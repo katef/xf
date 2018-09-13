@@ -1,0 +1,3 @@
+[submodule "share/git/flex"]
+	path = share/git/flex
+	url = https://github.com/xamarin/flex.git
