@@ -12,16 +12,16 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <string.h>
 #include <stdio.h>
 #include <limits.h>
 #include <math.h>
 
-#include <X11/Xlib.h>
-#include <X11/Xatom.h>
-#include <X11/Xutil.h>
+#include <xcb/xcb.h>
+#include <xcb/xcb_ewmh.h>
 
 #include <cairo.h>
-#include <cairo-xlib.h>
+#include <cairo-xcb.h>
 
 #include <pango/pangocairo.h>
 
@@ -52,77 +52,109 @@ struct act {
 	} u;
 };
 
-Drawable
-create_win(Display *display, int screen, int width, int height)
+static void
+print_modifiers(uint32_t mask)
 {
-	Drawable win;
-	Atom type;
-	unsigned int desktop;
-	pid_t cur_pid;
-	static char host_name[HOST_NAME_MAX];
-	char *hn = host_name;
-	XTextProperty txt_prop;
+	size_t i;
 
-	assert(display != NULL);
+	static const char *a[] = {
+		"Shift", "Lock", "Ctrl", "Alt",
+		"Mod2", "Mod3", "Mod4", "Mod5",
+		"Button1", "Button2", "Button3", "Button4", "Button5"
+	};
 
-	/* TODO: switch to xcb instead */
-
-	win = XCreateSimpleWindow(display,
-		DefaultRootWindow(display),
-		0, 0, width, height, 0, 0, 0);
-
-	type = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DOCK", False);
-	XChangeProperty(display, win,
-		XInternAtom(display, "_NET_WM_WINDOW_TYPE", False),
-		XInternAtom(display, "ATOM", False),
-		32, PropModeReplace,
-		(unsigned char *) &type, 1);
-
-	type = XInternAtom(display, "_NET_WM_STATE_ABOVE", False);
-	XChangeProperty(display, win,
-		XInternAtom(display, "_NET_WM_STATE", False),
-		XInternAtom(display, "ATOM", False),
-		32, PropModeReplace,
-		(unsigned char *) &type, 1);
-
-	type = XInternAtom(display, "_NET_WM_STATE_STICKY", False);
-	XChangeProperty(display, win,
-		XInternAtom(display, "_NET_WM_STATE", False),
-		XInternAtom(display, "ATOM", False),
-		32, PropModeAppend,
-		(unsigned char *) &type, 1);
-
-	desktop = 0xffffffff;
-	XChangeProperty(display, win,
-		XInternAtom(display, "_NET_WM_DESKTOP", False),
-		XInternAtom(display, "CARDINAL", False),
-		32, PropModeReplace,
-		(unsigned char *) &desktop, 1);
-
-	cur_pid = getpid();
-
-	gethostname(host_name, HOST_NAME_MAX);
-
-	XStringListToTextProperty(&hn, 1, &txt_prop);
-	XSetWMClientMachine(display, win, &txt_prop);
-	XFree(txt_prop.value);
-
-	XChangeProperty(display, win,
-		XInternAtom(display, "_NET_WM_PID", False),
-		XInternAtom(display, "CARDINAL", False),
-		32, PropModeReplace,
-		(unsigned char *) &cur_pid, 1);
-
-	return win;
+	for (i = 0; mask; mask >>= 1, i++) {
+		if (mask & 1) {
+			printf(a[i]);
+		}
+	}
 }
 
-void
-close_surface(cairo_surface_t *sfc)
+static xcb_screen_t *
+screen_of_display(xcb_connection_t *xcb, int screen)
 {
-	Display *dsp = cairo_xlib_surface_get_display(sfc);
+	xcb_screen_iterator_t it;
 
-	cairo_surface_destroy(sfc);
-	XCloseDisplay(dsp);
+	assert(xcb != NULL);
+
+	it = xcb_setup_roots_iterator(xcb_get_setup(xcb));
+	for ( ; it.rem; --screen, xcb_screen_next(&it)) {
+		if (screen == 0) {
+			return it.data;
+		}
+	}
+
+	return NULL;
+}
+
+static xcb_visualtype_t *
+visual_of_screen(xcb_connection_t *xcb, xcb_screen_t *screen, xcb_visualid_t visual_id)
+{
+	xcb_depth_iterator_t dit;
+	xcb_visualtype_iterator_t vit;
+
+	assert(xcb != NULL);
+	assert(screen != NULL);
+
+	dit = xcb_screen_allowed_depths_iterator(screen);
+	for ( ; dit.rem; xcb_depth_next(&dit)) {
+		vit = xcb_depth_visuals_iterator(dit.data);
+		for ( ; vit.rem; xcb_visualtype_next(&vit)) {
+			if (vit.data->visual_id == visual_id) {
+				return vit.data;
+			}
+		}
+	}
+
+	return NULL;
+}
+
+static xcb_window_t
+win_create(xcb_connection_t *xcb, xcb_ewmh_connection_t *ewmh,
+	xcb_screen_t *screen, int width, int height,
+	const char *title)
+{
+	xcb_window_t win;
+
+	assert(xcb != NULL);
+	assert(ewmh != NULL);
+	assert(screen != NULL);
+
+	uint32_t mask;
+	uint32_t valwin[1];
+
+	/* TODO: could set window border colour */
+	mask = XCB_CW_EVENT_MASK;
+	valwin[0]
+		= XCB_EVENT_MASK_KEY_PRESS
+		| XCB_EVENT_MASK_EXPOSURE
+		| XCB_EVENT_MASK_BUTTON_PRESS;
+
+	win = xcb_generate_id(xcb);
+
+	xcb_create_window(xcb,
+		XCB_COPY_FROM_PARENT,
+		win,
+		screen->root,
+		0, 0, width, height,
+		0,
+		XCB_WINDOW_CLASS_INPUT_OUTPUT,
+		screen->root_visual,
+		mask, valwin);
+
+	xcb_ewmh_set_wm_name        (ewmh, win, strlen(title), title);
+	xcb_ewmh_set_wm_visible_name(ewmh, win, strlen(title), title);
+	xcb_ewmh_set_wm_icon_name   (ewmh, win, strlen(title), title);
+
+	xcb_ewmh_set_wm_window_type (ewmh, win, 1, &ewmh->_NET_WM_WINDOW_TYPE_DOCK);
+	xcb_ewmh_set_wm_state       (ewmh, win, 1, &ewmh->_NET_WM_STATE_ABOVE);
+
+	xcb_ewmh_set_wm_pid(ewmh, win, getpid());
+	xcb_ewmh_set_wm_desktop(ewmh, win, 0xffffffff);
+
+	xcb_map_window(xcb, win);
+
+	return win;
 }
 
 static PangoColor
@@ -368,44 +400,79 @@ act_text(cairo_t *cr, struct flex_item *item, const struct act_text *text)
 	pango_cairo_show_layout(cr, text->layout);
 }
 
+static void
+paint(cairo_t *cr, struct flex_item *root, struct act *b, size_t n)
+{
+	unsigned i;
+	double w, h;
+
+	flex_layout(root);
+
+	w = flex_item_get_width(root);
+	h = flex_item_get_height(root);
+
+	/* TODO: bg */
+	cairo_set_source_rgba(cr, 0.2, 0.3, 0.4, 1.0);
+	cairo_rectangle(cr, 0, 0, w, h);
+	cairo_fill(cr);
+
+	for (i = 0; i < n; i++) {
+		switch (b[i].type) {
+		case ACT_RULE:
+			act_rule(cr, b[i].item, &b[i].u.hr);
+			break;
+
+		case ACT_TEXT:
+			act_text(cr, b[i].item, &b[i].u.text);
+			break;
+
+		default:
+			assert(!"unreached");
+			break;
+		}
+	}
+}
+
 int
 main(int argc, char **argv)
 {
-	cairo_surface_t *sfc;
+	cairo_surface_t *surface;
 	cairo_t *cr;
 	PangoLayout *layout;
 	PangoFontDescription *desc;
 	struct act b[50];
-	unsigned n;
+	size_t n;
 	struct flex_item *root;
 	int height, width;
 	double margin, padding;
-	Display *display;
-	Drawable win;
-	int screen;
+	xcb_window_t win;
+	xcb_connection_t *xcb;
+	xcb_ewmh_connection_t ewmh;
+	xcb_screen_t *screen;
+	xcb_visualtype_t *visual;
+	int screen_number;
 
 	margin  = 0;
 	padding = 0;
 
-	display = XOpenDisplay(NULL);
-	if (display == NULL) {
-		exit(1);
-	}
+	xcb = xcb_connect(NULL, &screen_number);
 
-	screen = DefaultScreen(display);
+	xcb_intern_atom_cookie_t *cookie = xcb_ewmh_init_atoms(xcb, &ewmh);
+	xcb_ewmh_init_atoms_replies(&ewmh, cookie, NULL);
 
-	width  = DisplayWidth(display, screen);
+	screen = screen_of_display(xcb, screen_number);
+	visual = visual_of_screen(xcb, screen, screen->root_visual);
+
+	width  = screen->width_in_pixels;
 	height = 20;
 
-	win = create_win(display, screen, width, height);
+	/* TODO: title */
+	win = win_create(xcb, &ewmh, screen, width, height, "hello");
 
-	XSelectInput(display, win, ButtonPressMask | KeyPressMask);
-	XMapWindow(display, win);
+	surface = cairo_xcb_surface_create(xcb, win, visual, width, height);
+	cairo_xcb_surface_set_size(surface, width, height);
 
-	sfc = cairo_xlib_surface_create(display, win, DefaultVisual(display, screen), width, height);
-	cairo_xlib_surface_set_size(sfc, width, height);
-
-	cr = cairo_create(sfc);
+	cr = cairo_create(surface);
 
 	cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
 
@@ -562,65 +629,50 @@ main(int argc, char **argv)
 	pango_font_description_free(desc);
 	g_object_unref(layout);
 
-	{
-		unsigned i;
-		double w, h;
+	xcb_generic_event_t *e;
 
-		flex_layout(root);
+	while (e = xcb_wait_for_event(xcb), e != NULL) {
+		switch (e->response_type & ~0x80) {
+		case XCB_KEY_PRESS: {
+			xcb_key_press_event_t *press = (xcb_key_press_event_t *) e;
+			fprintf(stderr, "key %d\n", press->detail);
+			if (press->detail == 24) exit(1);
+			break;
+		}
 
-		w = flex_item_get_width(root);
-		h = flex_item_get_height(root);
+		case XCB_EXPOSE: {
+			xcb_expose_event_t *expose = (xcb_expose_event_t *) e;
 
-		/* TODO: bg */
-		cairo_set_source_rgba(cr, 0.2, 0.3, 0.4, 1.0);
-		cairo_rectangle(cr, 0, 0, w, h);
-		cairo_fill(cr);
-
-		for (i = 0; i < n; i++) {
-			switch (b[i].type) {
-			case ACT_RULE:
-				act_rule(cr, b[i].item, &b[i].u.hr);
-				break;
-
-			case ACT_TEXT:
-				act_text(cr, b[i].item, &b[i].u.text);
-				break;
-
-			default:
-				assert(!"unreached");
+			if (expose->count != 0) {
 				break;
 			}
+
+			fprintf(stderr, "expose\n");
+
+			paint(cr, root, b, n);
+			xcb_flush(xcb);
+			break;
 		}
+
+		case XCB_BUTTON_PRESS: {
+			xcb_button_press_event_t *press = (xcb_button_press_event_t *) e;
+			fprintf(stderr, "button %d", press->detail);
+			print_modifiers(press->state);
+			fprintf(stderr, "\n");
+			break;
+		}
+
+		default:
+			fprintf(stderr, "unhandled event %d\n", e->response_type & ~0x80);
+			break;
+		}
+
+		free(e);
 	}
 
 	flex_item_free(root);
-	cairo_destroy(cr);
-
-	for (;;) {
-		char keybuf[8];
-		KeySym key;
-		XEvent e;
-
-		XNextEvent(cairo_xlib_surface_get_display(sfc), &e);
-
-		switch (e.type) {
-		case ButtonPress:
-			fprintf(stderr, "button %d\n", e.xbutton.button);
-			continue;
-
-		case KeyPress:
-			XLookupString(&e.xkey, keybuf, sizeof(keybuf), &key, NULL);
-			fprintf(stderr, "key %lu\n", key);
-			if (key == 113) exit(1);
-			continue;
-
-		default:
-			fprintf(stderr, "unhandled XEevent %d\n", e.type);
-			continue;
-		}
-	}
-
-	close_surface(sfc);
+	cairo_surface_destroy(surface);
+	xcb_disconnect(xcb);
 
 	return 0;
 }
