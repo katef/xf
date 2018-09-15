@@ -34,6 +34,7 @@ enum op_type {
 	OP_FG,
 	OP_FONT,
 	OP_GROW,
+	OP_IMG,
 	OP_RULE,
 	OP_MARKUP,
 	OP_TEXT
@@ -41,8 +42,9 @@ enum op_type {
 
 /* TODO: moveto, drawing lines, images etc */
 enum act_type {
-	ACT_TEXT,
-	ACT_RULE
+	ACT_IMG,
+	ACT_RULE,
+	ACT_TEXT
 };
 
 struct act {
@@ -51,6 +53,11 @@ struct act {
 	struct flex_item *item;
 
 	union {
+		struct act_img {
+			PangoColor bg;
+			cairo_surface_t *img;
+		} img;
+
 		struct act_rule {
 			PangoColor fg;
 			PangoColor bg;
@@ -77,6 +84,7 @@ op_name(const char *cmd)
 		{ "fg",     OP_FG     },
 		{ "font",   OP_FONT   },
 		{ "grow",   OP_GROW   },
+		{ "img",    OP_IMG    },
 		{ "rule",   OP_RULE   },
 		{ "markup", OP_MARKUP },
 		{ "text",   OP_TEXT   }
@@ -232,6 +240,59 @@ op_font(cairo_t *cr, PangoLayout *layout, PangoFontDescription **desc, const cha
 }
 
 static struct flex_item *
+op_img(struct act *act, const char *file,
+	PangoColor *bg,
+	double margin, double padding)
+{
+	struct flex_item *item;
+	int width, height;
+	cairo_surface_t *img;
+	const char *p;
+
+	assert(act != NULL);
+	assert(bg != NULL);
+	assert(file != NULL);
+
+	p = strrchr(file, '.');
+	if (p == NULL) {
+		fprintf(stderr, "%s: file extension not found\n", file);
+		exit(1);
+	}
+
+	p++;
+
+	/* TODO: s/^~/$HOME/ */
+	/* TODO: cairo_svg_surface_create(file, ...); */
+
+#ifdef CAIRO_HAS_PNG_FUNCTIONS
+	if (0 == strcasecmp(p, "png")) {
+		img = cairo_image_surface_create_from_png(file);
+	} else
+#endif
+	{
+		fprintf(stderr, "%s: unsupported file extension\n", file);
+		exit(1);
+	}
+
+	act->type = ACT_IMG;
+
+	act->u.img.bg  = *bg;
+	act->u.img.img = img;
+
+	item = flex_item_new();
+
+	width  = cairo_image_surface_get_width(img);
+	height = cairo_image_surface_get_height(img);
+
+	/* TODO: force min-height here? or leave to flexbox layout */
+
+	flex_item_set_width(item,  width  + (padding * 2));
+	flex_item_set_height(item, height + (padding * 2));
+
+	return item;
+}
+
+static struct flex_item *
 op_rule(struct act *act,
 	PangoColor *fg, PangoColor *bg,
 	PangoLayout *layout,
@@ -321,6 +382,61 @@ op_text(struct act *act, PangoLayout *layout, const char *s,
 	flex_item_set_height(item, height + (padding * 2));
 
 	return item;
+}
+
+static void
+act_img(cairo_t *cr, struct flex_item *item, const struct act_img *img)
+{
+	double x, y, w, h;
+	double ml, mr, mt, mb, mw, mh;
+	double pl, pr, pt, pb, pw, ph;
+
+	assert(cr != NULL);
+	assert(item != NULL);
+	assert(img != NULL);
+
+	/* these contain the padding but not the margins */
+	x = flex_item_get_frame_x(item);
+	y = flex_item_get_frame_y(item);
+	w = flex_item_get_frame_width(item);
+	h = flex_item_get_frame_height(item);
+
+	ml = flex_item_get_margin_left(item);
+	mr = flex_item_get_margin_right(item);
+	mt = flex_item_get_margin_top(item);
+	mb = flex_item_get_margin_bottom(item);
+	mw = ml + mr;
+	mh = mt + mb;
+
+	pl = flex_item_get_padding_left(item);
+	pr = flex_item_get_padding_right(item);
+	pt = flex_item_get_padding_top(item);
+	pb = flex_item_get_padding_bottom(item);
+	pw = pl + pr;
+	ph = pt + pb;
+
+/*
+	cairo_set_source_rgba(cr, 0.4, 0.4, 0.4, 0.5);
+	cairo_rectangle(cr, x - ml, y - mt, w + mw, h + mh);
+	cairo_fill(cr);
+*/
+
+/*
+	cairo_set_source_rgba(cr, img->bg.red, img->bg.green, img->bg.blue, 1.0);
+	cairo_rectangle(cr, x, y, w, h);
+	cairo_fill(cr);
+*/
+
+/*
+	cairo_set_source_rgba(cr, 0.0, 0.4, 0.4, 0.5);
+	cairo_rectangle(cr, x + pl, y + pt, w - pw, h - ph);
+	cairo_fill(cr);
+*/
+
+	cairo_set_source_surface(cr, img->img, x + pl, y + pt);
+
+/* XXX */
+	cairo_paint(cr);
 }
 
 static void
@@ -460,6 +576,10 @@ paint(cairo_t *cr, struct flex_item *root, struct act *b, size_t n)
 
 	for (i = 0; i < n; i++) {
 		switch (b[i].type) {
+		case ACT_IMG:
+			act_img(cr, b[i].item, &b[i].u.img);
+			break;
+
 		case ACT_RULE:
 			act_rule(cr, b[i].item, &b[i].u.hr);
 			break;
@@ -575,6 +695,10 @@ make_item(enum op_type op, const char *arg, struct act *act,
 	case OP_GROW:
 		*grow = strtod(arg, NULL); /* XXX */
 		return NULL;
+
+	case OP_IMG:
+		item = op_img(act, arg, bg, *margin, *padding);
+		break;
 
 	case OP_RULE:
 		item = op_rule(act, fg, bg, layout, *margin, *padding);
