@@ -27,6 +27,18 @@
 
 #include <flex.h>
 
+#define MAX_LINE_LEN 8192
+
+enum op_type {
+	OP_BG,
+	OP_FG,
+	OP_FONT,
+	OP_GROW,
+	OP_RULE,
+	OP_MARKUP,
+	OP_TEXT
+};
+
 /* TODO: moveto, drawing lines, images etc */
 enum act_type {
 	ACT_TEXT,
@@ -51,6 +63,34 @@ struct act {
 		} text;
 	} u;
 };
+
+static enum op_type
+op_name(const char *cmd)
+{
+	size_t i;
+
+	static const struct {
+		const char *cmd;
+		enum op_type op;
+	} a[] = {
+		{ "bg",     OP_BG     },
+		{ "fg",     OP_FG     },
+		{ "font",   OP_FONT   },
+		{ "grow",   OP_GROW   },
+		{ "rule",   OP_RULE   },
+		{ "markup", OP_MARKUP },
+		{ "text",   OP_TEXT   }
+	};
+
+	for (i = 0; i < sizeof a / sizeof *a; i++) {
+		if (0 == strcmp(a[i].cmd, cmd)) {
+			return a[i].op;
+		}
+	}
+
+	fprintf(stderr, "unrecognised command ^%s\n", cmd);
+	exit(1);
+}
 
 static void
 print_modifiers(uint32_t mask)
@@ -151,6 +191,8 @@ win_create(xcb_connection_t *xcb, xcb_ewmh_connection_t *ewmh,
 
 	xcb_ewmh_set_wm_pid(ewmh, win, getpid());
 	xcb_ewmh_set_wm_desktop(ewmh, win, 0xffffffff);
+
+	/* TODO: _NET_WM_STRUT_PARTIAL and friends */
 
 	xcb_map_window(xcb, win);
 
@@ -433,6 +475,147 @@ paint(cairo_t *cr, struct flex_item *root, struct act *b, size_t n)
 	}
 }
 
+static char *
+parse_op(char *p, enum op_type *op, char **arg)
+{
+	assert(p != NULL);
+	assert(op != NULL);
+	assert(arg != NULL && *arg != NULL);
+
+	/*
+	 * TODO: otf feature for tnum
+	 * TODO: push/pop for heirachical flexbox model
+	 * container, item
+	 */
+
+	switch (*p) {
+	case '\0':
+		return NULL;
+
+	case '\n':
+		*p = '\0';
+		*op = OP_TEXT;
+		break;
+
+	case '{':
+	case '}':
+		if (*arg < p) {
+			*op = OP_TEXT;
+			break;
+		}
+
+		/* TODO: open/close flex container */
+
+		p++;
+		break;
+
+	case '^':
+		if (*arg < p) {
+			*op = OP_TEXT;
+			break;
+		}
+
+		p++;
+
+		const char *tmp;
+
+		tmp = p;
+		p += strcspn(p, "{");
+		if (*p == '\0') { fprintf(stderr, "syntax error\n"); exit(1); }
+		*p = '\0';
+
+		*op = op_name(tmp);
+
+		p++;
+
+		/* TODO: check arity, consider perhaps multiple arguments */
+		*arg = p;
+		p += strcspn(p, "}");
+		if (*p == '\0') { fprintf(stderr, "syntax error\n"); exit(1); }
+		*p = '\0';
+
+		p++;
+		break;
+
+	case '\f':
+	case '\t':
+	case '\v':
+		*p = ' ';
+	default:
+		p++;
+		return parse_op(p, op, arg);
+	}
+
+	return p;
+}
+
+static struct flex_item *
+make_item(enum op_type op, const char *arg, struct act *act,
+	cairo_t *cr, PangoLayout *layout,
+	PangoColor *fg, PangoColor *bg, PangoFontDescription **desc,
+	double *grow, double *margin, double *padding)
+{
+	struct flex_item *item;
+
+	assert(arg != NULL);
+	assert(act != NULL);
+	assert(layout != NULL);
+	assert(fg != NULL);
+	assert(bg != NULL);
+	assert(desc != NULL);
+	assert(grow != NULL);
+	assert(margin != NULL);
+	assert(padding != NULL);
+
+	switch (op) {
+	case OP_BG:     *bg = op_color(arg);             return NULL;
+	case OP_FG:     *fg = op_color(arg);             return NULL;
+	case OP_FONT:   op_font(cr, layout, desc, arg); return NULL;
+
+	case OP_GROW:
+		*grow = strtod(arg, NULL); /* XXX */
+		return NULL;
+
+	case OP_RULE:
+		item = op_rule(act, fg, bg, layout, *margin, *padding);
+		if (*grow == 0.0) {
+			*grow = 10.0; /* TODO: something sensible for OP_RULE */
+		}
+		break;
+
+	/* pango markup: https://developer.gnome.org/pango/stable/PangoMarkupFormat.html */
+	case OP_MARKUP:
+		item = op_text(act, layout, arg, fg, bg, *margin, *padding,
+			pango_layout_set_markup);
+		break;
+
+	case OP_TEXT:
+		item = op_text(act, layout, arg, fg, bg, *margin, *padding,
+			pango_layout_set_text);
+		break;
+
+	default:
+		assert(!"unreached");
+	}
+
+	if (!isnan(flex_item_get_width(item))) {
+		flex_item_set_grow(item, *grow);
+		*grow = 0.0;
+	}
+
+	flex_item_set_margin_top(item, *margin);
+	flex_item_set_margin_left(item, *margin);
+	flex_item_set_margin_bottom(item, *margin);
+	flex_item_set_margin_right(item, *margin);
+
+	flex_item_set_padding_top(item, *padding);
+	flex_item_set_padding_left(item, *padding);
+	flex_item_set_padding_bottom(item, *padding);
+	flex_item_set_padding_right(item, *padding);
+
+	return item;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -503,126 +686,55 @@ main(int argc, char **argv)
 
 	n = 0;
 
-	{
-		enum op_type { OP_BG, OP_FG, OP_FONT, OP_GROW, OP_RULE, OP_MARKUP, OP_TEXT };
-		PangoColor fg, bg;
-		double grow;
-		unsigned i;
+	char buf[MAX_LINE_LEN];
 
-		fg = op_color("white");
-		bg = op_color("black");
-		grow = 0.0;
+	PangoColor fg, bg;
+	double grow;
 
-		/*
-		 * TODO: otf feature for tnum
-		 * TODO: push/pop for heirachical flexbox model
-		 * container, item
-		 */
-		struct {
-			enum op_type type;
-			const char *s;
-		} a[] = {
-			{ OP_FONT,   "Sans 12" },
+	/* evalator state persists between ops (and over lines) */
+	fg = op_color("white");
+	bg = op_color("black");
+	grow = 0.0;
 
-			{ OP_BG,     "white" },
-			{ OP_FG,     "black" },
-			{ OP_TEXT,   " 1 " },
+	while (fgets(buf, sizeof buf, stdin) != NULL) {
+		enum op_type op;
+		char *arg;
+		char *p;
 
-			{ OP_BG,     "black" },
-			{ OP_FG,     "gray" },
-			{ OP_TEXT,   " 2 " },
+		buf[sizeof buf - 1] = 'x';
 
-			{ OP_BG,     "black" },
-			{ OP_FG,     "gray" },
-			{ OP_TEXT,   " 3 " },
+		if (buf[sizeof buf - 1] == '\0' && buf[sizeof buf - 2] != '\n') {
+			fprintf(stderr, "buffer overflow\n");
+			exit(1);
+		}
 
-			{ OP_BG,     "black" },
-			{ OP_FG,     "gray" },
-			{ OP_TEXT,   " 4 " },
+		arg = p = buf;
 
-			{ OP_BG,     "black" },
-			{ OP_FG,     "gray" },
-			{ OP_TEXT,   " 5 " },
-
-			{ OP_BG,     "black" },
-			{ OP_FG,     "gray" },
-			{ OP_TEXT,   " 6 " },
-
-			{ OP_BG,     "black" },
-			{ OP_FG,     "gray" },
-			{ OP_TEXT,   " 7 " },
-
-			{ OP_BG,     "black" },
-			{ OP_FG,     "gray" },
-			{ OP_TEXT,   " 8 " },
-
-			{ OP_BG,     "black" },
-			{ OP_FG,     "gray" },
-			{ OP_TEXT,   " 9 " },
-
-			{ OP_BG,     "black" },
-			{ OP_FG,     "white" },
-			{ OP_TEXT,   "10/12 hello.c " },
-
-			{ OP_GROW,   "2.0"  },
-			{ OP_RULE,   NULL   },
-			{ OP_MARKUP, "x" },
-			{ OP_GROW,   "1.0"  },
-			{ OP_RULE,   NULL   },
-			{ OP_MARKUP, "xyz" },
-			{ OP_MARKUP, " 17:25 " },
-		};
-
-		for (i = 0; i < sizeof a / sizeof *a; i++) {
+		while (p = parse_op(p, &op, &arg), p != NULL) {
 			struct flex_item *item;
+			char tmp;
 
-			switch (a[i].type) {
-			case OP_BG:     bg = op_color(a[i].s);              continue;
-			case OP_FG:     fg = op_color(a[i].s);              continue;
-			case OP_FONT:   op_font(cr, layout, &desc, a[i].s); continue;
-
-			case OP_GROW:
-				grow = strtod(a[i].s, NULL); /* XXX */
-				continue;
-
-			case OP_RULE:
-				item = op_rule(&b[n], &fg, &bg, layout, margin, padding);
-				if (grow == 0.0) {
-					grow = 10; /* TODO: something sensible for OP_RULE */
-				}
-				break;
-
-			/* pango markup: https://developer.gnome.org/pango/stable/PangoMarkupFormat.html */
-			case OP_MARKUP:
-				item = op_text(&b[n], layout, a[i].s, &fg, &bg, margin, padding, pango_layout_set_markup);
-				break;
-
-			case OP_TEXT:
-				item = op_text(&b[n], layout, a[i].s, &fg, &bg, margin, padding, pango_layout_set_text);
-				break;
-
-			default:
-				assert(!"unreached");
+			if (op == OP_TEXT) {
+				tmp = *p;
+				*p = '\0';
 			}
 
-			if (!isnan(flex_item_get_width(item))) {
-				flex_item_set_grow(item, grow);
-				grow = 0.0;
+			item = make_item(op, arg, &b[n],
+				cr, layout,
+				&fg, &bg, &desc,
+				&grow, &margin, &padding);
+
+			if (item != NULL) {
+				b[n].item = item;
+				flex_item_add(root, b[n].item);
+				n++;
 			}
 
-			flex_item_set_margin_top(item, margin);
-			flex_item_set_margin_left(item, margin);
-			flex_item_set_margin_bottom(item, margin);
-			flex_item_set_margin_right(item, margin);
+			if (op == OP_TEXT) {
+				*p = tmp;
+			}
 
-			flex_item_set_padding_top(item, padding);
-			flex_item_set_padding_left(item, padding);
-			flex_item_set_padding_bottom(item, padding);
-			flex_item_set_padding_right(item, padding);
-
-			b[n].item = item;
-			flex_item_add(root, b[n].item);
-			n++;
+			arg = p;
 		}
 	}
 
