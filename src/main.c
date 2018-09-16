@@ -47,29 +47,96 @@ enum act_type {
 	ACT_TEXT
 };
 
+struct rgba {
+	float r;
+	float g;
+	float b;
+	float a;
+};
+
+struct geom {
+	double x;
+	double y;
+	double w;
+	double h;
+};
+
+struct outline {
+	double t;
+	double r;
+	double b;
+	double l;
+	double w;
+	double h;
+};
+
 struct act {
 	enum act_type type;
 
 	struct flex_item *item;
+	PangoColor bg;
 
 	union {
 		struct act_img {
-			PangoColor bg;
 			cairo_surface_t *img;
 		} img;
 
 		struct act_rule {
 			PangoColor fg;
-			PangoColor bg;
 		} hr;
 
 		struct act_text {
 			PangoColor fg;
-			PangoColor bg;
 			PangoLayout *layout; /* copy, needs destroying */
 		} text;
 	} u;
 };
+
+/* frame coordinates contain the padding but not the margins */
+static struct geom
+flex_item_get_frame(struct flex_item *item)
+{
+	struct geom f;
+
+	assert(item != NULL);
+
+	f.x = flex_item_get_frame_x(item);
+	f.y = flex_item_get_frame_y(item);
+	f.w = flex_item_get_frame_width(item);
+	f.h = flex_item_get_frame_height(item);
+
+	return f;
+}
+
+static struct outline
+flex_item_get_margin(struct flex_item *item)
+{
+	struct outline o;
+
+	o.t = flex_item_get_margin_top(item);
+	o.r = flex_item_get_margin_right(item);
+	o.b = flex_item_get_margin_bottom(item);
+	o.l = flex_item_get_margin_left(item);
+	o.w = o.l + o.r;
+	o.h = o.t + o.b;
+
+	return o;
+}
+
+static struct outline
+flex_item_get_padding(struct flex_item *item)
+{
+	struct outline o;
+
+	o.t = flex_item_get_padding_top(item);
+	o.r = flex_item_get_padding_right(item);
+	o.b = flex_item_get_padding_bottom(item);
+	o.l = flex_item_get_padding_left(item);
+	o.w = o.l + o.r;
+	o.h = o.t + o.b;
+
+	return o;
+}
 
 static enum op_type
 op_name(const char *cmd)
@@ -98,6 +165,28 @@ op_name(const char *cmd)
 
 	fprintf(stderr, "unrecognised command ^%s\n", cmd);
 	exit(1);
+}
+
+static void
+draw_frame(cairo_t *cr, const PangoColor *c,
+	const struct geom *f,
+	const struct outline *m, const struct outline *p)
+{
+/*
+	cairo_set_source_rgba(cr, 0.4, 0.4, 1.0, 0.5);
+	cairo_rectangle(cr, f->x - m->l, f->y - m->t, f->w + m->w, f->h + m->h);
+	cairo_fill(cr);
+*/
+
+	cairo_set_source_rgba(cr, c->red, c->green, c->blue, 1.0);
+	cairo_rectangle(cr, f->x, f->y, f->w, f->h);
+	cairo_fill(cr);
+
+/*
+	cairo_set_source_rgba(cr, 1.0, 0.4, 0.4, 0.5);
+	cairo_rectangle(cr, f->x + p->l, f->y + p->t, f->w - p->w, f->h - p->h);
+	cairo_fill(cr);
+*/
 }
 
 static void
@@ -214,6 +303,9 @@ op_color(const char *s)
 
 	assert(s != NULL);
 
+	/* TODO: disallow #rrrgggbbb or #rrrrggggbbbb */
+	/* TODO: allow #rrggbbaa for alpha */
+
 	/* CSS spec color names */
 	if (!pango_color_parse(&c, s)) {
 		perror("pango_color_parse");
@@ -241,7 +333,6 @@ op_font(cairo_t *cr, PangoLayout *layout, PangoFontDescription **desc, const cha
 
 static struct flex_item *
 op_img(struct act *act, const char *file,
-	PangoColor *bg,
 	double margin, double padding)
 {
 	struct flex_item *item;
@@ -250,7 +341,6 @@ op_img(struct act *act, const char *file,
 	const char *p;
 
 	assert(act != NULL);
-	assert(bg != NULL);
 	assert(file != NULL);
 
 	p = strrchr(file, '.');
@@ -276,7 +366,6 @@ op_img(struct act *act, const char *file,
 
 	act->type = ACT_IMG;
 
-	act->u.img.bg  = *bg;
 	act->u.img.img = img;
 
 	item = flex_item_new();
@@ -294,7 +383,7 @@ op_img(struct act *act, const char *file,
 
 static struct flex_item *
 op_rule(struct act *act,
-	PangoColor *fg, PangoColor *bg,
+	PangoColor *fg,
 	PangoLayout *layout,
 	double margin, double padding)
 {
@@ -303,13 +392,11 @@ op_rule(struct act *act,
 
 	assert(act != NULL);
 	assert(fg != NULL);
-	assert(bg != NULL);
 	assert(layout != NULL);
 
 	act->type = ACT_RULE;
 
 	act->u.hr.fg = *fg;
-	act->u.hr.bg = *bg;
 
 	item = flex_item_new();
 
@@ -349,7 +436,7 @@ op_rule(struct act *act,
 
 static struct flex_item *
 op_text(struct act *act, PangoLayout *layout, const char *s,
-	PangoColor *fg, PangoColor *bg,
+	PangoColor *fg,
 	double margin, double padding,
 	void (*f)(PangoLayout *, const char *, int))
 {
@@ -358,7 +445,6 @@ op_text(struct act *act, PangoLayout *layout, const char *s,
 
 	assert(act != NULL);
 	assert(fg != NULL);
-	assert(bg != NULL);
 	assert(layout != NULL);
 	assert(s != NULL);
 	assert(f != NULL);
@@ -368,7 +454,6 @@ op_text(struct act *act, PangoLayout *layout, const char *s,
 	act->type = ACT_TEXT;
 
 	act->u.text.fg = *fg;
-	act->u.text.bg = *bg;
 	act->u.text.layout = pango_layout_copy(layout);
 
 	item = flex_item_new();
@@ -385,173 +470,62 @@ op_text(struct act *act, PangoLayout *layout, const char *s,
 }
 
 static void
-act_img(cairo_t *cr, struct flex_item *item, const struct act_img *img)
+act_img(cairo_t *cr,
+	const struct geom *f, const struct outline *m, const struct outline *p,
+	const struct act_img *img)
 {
-	double x, y, w, h;
-	double ml, mr, mt, mb, mw, mh;
-	double pl, pr, pt, pb, pw, ph;
-
 	assert(cr != NULL);
-	assert(item != NULL);
+	assert(f != NULL);
+	assert(m != NULL);
+	assert(p != NULL);
 	assert(img != NULL);
 
-	/* these contain the padding but not the margins */
-	x = flex_item_get_frame_x(item);
-	y = flex_item_get_frame_y(item);
-	w = flex_item_get_frame_width(item);
-	h = flex_item_get_frame_height(item);
+	cairo_set_source_surface(cr, img->img, f->x + p->l, f->y + p->t);
 
-	ml = flex_item_get_margin_left(item);
-	mr = flex_item_get_margin_right(item);
-	mt = flex_item_get_margin_top(item);
-	mb = flex_item_get_margin_bottom(item);
-	mw = ml + mr;
-	mh = mt + mb;
-
-	pl = flex_item_get_padding_left(item);
-	pr = flex_item_get_padding_right(item);
-	pt = flex_item_get_padding_top(item);
-	pb = flex_item_get_padding_bottom(item);
-	pw = pl + pr;
-	ph = pt + pb;
-
-/*
-	cairo_set_source_rgba(cr, 0.4, 0.4, 0.4, 0.5);
-	cairo_rectangle(cr, x - ml, y - mt, w + mw, h + mh);
-	cairo_fill(cr);
-*/
-
-/*
-	cairo_set_source_rgba(cr, img->bg.red, img->bg.green, img->bg.blue, 1.0);
-	cairo_rectangle(cr, x, y, w, h);
-	cairo_fill(cr);
-*/
-
-/*
-	cairo_set_source_rgba(cr, 0.0, 0.4, 0.4, 0.5);
-	cairo_rectangle(cr, x + pl, y + pt, w - pw, h - ph);
-	cairo_fill(cr);
-*/
-
-	cairo_set_source_surface(cr, img->img, x + pl, y + pt);
-
-/* XXX */
 	cairo_paint(cr);
 }
 
 static void
-act_rule(cairo_t *cr, struct flex_item *item, const struct act_rule *hr)
+act_rule(cairo_t *cr,
+	const struct geom *f, const struct outline *m, const struct outline *p,
+	const struct act_rule *rule)
 {
-	double x, y, w, h;
-	double ml, mr, mt, mb, mw, mh;
-	double pl, pr, pt, pb, pw, ph;
-
 	assert(cr != NULL);
-	assert(item != NULL);
-	assert(hr != NULL);
-
-	/* these contain the padding but not the margins */
-	x = flex_item_get_frame_x(item);
-	y = flex_item_get_frame_y(item);
-	w = flex_item_get_frame_width(item);
-	h = flex_item_get_frame_height(item);
-
-	ml = flex_item_get_margin_left(item);
-	mr = flex_item_get_margin_right(item);
-	mt = flex_item_get_margin_top(item);
-	mb = flex_item_get_margin_bottom(item);
-	mw = ml + mr;
-	mh = mt + mb;
-
-	pl = flex_item_get_padding_left(item);
-	pr = flex_item_get_padding_right(item);
-	pt = flex_item_get_padding_top(item);
-	pb = flex_item_get_padding_bottom(item);
-	pw = pl + pr;
-	ph = pt + pb;
-
-/*
-	cairo_set_source_rgba(cr, 0.4, 0.4, 0.4, 0.5);
-	cairo_rectangle(cr, x - ml, y - mt, w + mw, h + mh);
-	cairo_fill(cr);
-*/
-
-	cairo_set_source_rgba(cr, hr->bg.red, hr->bg.green, hr->bg.blue, 1.0);
-	cairo_rectangle(cr, x, y, w, h);
-	cairo_fill(cr);
-
-/*
-	cairo_set_source_rgba(cr, 0.0, 0.4, 0.4, 0.5);
-	cairo_rectangle(cr, x + pl, y + pt, w - pw, h - ph);
-	cairo_fill(cr);
-*/
+	assert(f != NULL);
+	assert(m != NULL);
+	assert(p != NULL);
+	assert(rule != NULL);
 
 	/* TODO: line style, dashed etc */
 	/* TODO: automatic horizontal/vertical rule */
 
-	cairo_set_source_rgba(cr, hr->fg.red, hr->fg.green, hr->fg.blue, 1.0);
-	cairo_move_to(cr, x + pl, y + pt + ((h - ph) / 2.0));
-	cairo_rel_line_to(cr, w - pw, 0.0);
+	cairo_set_source_rgba(cr, rule->fg.red, rule->fg.green, rule->fg.blue, 1.0);
+	cairo_move_to(cr, f->x + p->l, f->y + p->t + ((f->h - p->h) / 2.0));
+	cairo_rel_line_to(cr, f->w - p->w, 0.0);
 	cairo_stroke(cr);
 }
 
 static void
-act_text(cairo_t *cr, struct flex_item *item, const struct act_text *text)
+act_text(cairo_t *cr,
+	const struct geom *f, const struct outline *m, const struct outline *p,
+	const struct act_text *text)
 {
-	double x, y, w, h;
-	double ml, mr, mt, mb, mw, mh;
-	double pl, pr, pt, pb, pw, ph;
-
 	assert(cr != NULL);
-	assert(item != NULL);
+	assert(f != NULL);
+	assert(m != NULL);
+	assert(p != NULL);
 	assert(text != NULL);
-
-	/* these contain the padding but not the margins */
-	x = flex_item_get_frame_x(item);
-	y = flex_item_get_frame_y(item);
-	w = flex_item_get_frame_width(item);
-	h = flex_item_get_frame_height(item);
-
-	ml = flex_item_get_margin_left(item);
-	mr = flex_item_get_margin_right(item);
-	mt = flex_item_get_margin_top(item);
-	mb = flex_item_get_margin_bottom(item);
-	mw = ml + mr;
-	mh = mt + mb;
-
-	pl = flex_item_get_padding_left(item);
-	pr = flex_item_get_padding_right(item);
-	pt = flex_item_get_padding_top(item);
-	pb = flex_item_get_padding_bottom(item);
-	pw = pl + pr;
-	ph = pt + pb;
-
-/*
-	cairo_set_source_rgba(cr, 0.4, 0.4, 0.4, 0.5);
-	cairo_rectangle(cr, x - ml, y - mt, w + mw, h + mh);
-	cairo_fill(cr);
-*/
-
-	cairo_set_source_rgba(cr, text->bg.red, text->bg.green, text->bg.blue, 1.0);
-	cairo_rectangle(cr, x, y, w, h);
-	cairo_fill(cr);
-
-/*
-	cairo_set_source_rgba(cr, 0.0, 0.4, 0.4, 0.5);
-	cairo_rectangle(cr, x + pl, y + pt, w - pw, h - ph);
-	cairo_fill(cr);
-*/
 
 /*
 	int baseline = pango_layout_get_baseline(text->layout);
 
 	cairo_set_source_rgba(cr, text->fg.red * 0.2, text->fg.green * 0.2, text->fg.blue * 0.2, 0.8);
-	cairo_move_to(cr, x + pl, y + pt + (double) baseline / PANGO_SCALE);
-	cairo_rel_line_to(cr, w - pw, 0.0);
+	cairo_move_to(cr, f->x + p->l, f->y + p->t + (double) baseline / PANGO_SCALE);
+	cairo_rel_line_to(cr, f->w - p->w, 0.0);
 	cairo_stroke(cr);
 */
 
-	cairo_move_to(cr, x + pl, y + pt);
+	cairo_move_to(cr, f->x + p->l, f->y + p->t);
 
 	cairo_set_source_rgba(cr, text->fg.red, text->fg.green, text->fg.blue, 1.0);
 
@@ -575,17 +549,26 @@ paint(cairo_t *cr, struct flex_item *root, struct act *b, size_t n)
 	cairo_fill(cr);
 
 	for (i = 0; i < n; i++) {
+		struct geom f;
+		struct outline m, p;
+
+		f = flex_item_get_frame(b[i].item);
+		m = flex_item_get_margin(b[i].item);
+		p = flex_item_get_padding(b[i].item);
+
+		draw_frame(cr, &b[i].bg, &f, &m, &p);
+
 		switch (b[i].type) {
 		case ACT_IMG:
-			act_img(cr, b[i].item, &b[i].u.img);
+			act_img(cr, &f, &m, &p, &b[i].u.img);
 			break;
 
 		case ACT_RULE:
-			act_rule(cr, b[i].item, &b[i].u.hr);
+			act_rule(cr, &f, &m, &p, &b[i].u.hr);
 			break;
 
 		case ACT_TEXT:
-			act_text(cr, b[i].item, &b[i].u.text);
+			act_text(cr, &f, &m, &p, &b[i].u.text);
 			break;
 
 		default:
@@ -688,8 +671,8 @@ make_item(enum op_type op, const char *arg, struct act *act,
 	assert(padding != NULL);
 
 	switch (op) {
-	case OP_BG:     *bg = op_color(arg);             return NULL;
-	case OP_FG:     *fg = op_color(arg);             return NULL;
+	case OP_BG:     *bg = op_color(arg);            return NULL;
+	case OP_FG:     *fg = op_color(arg);            return NULL;
 	case OP_FONT:   op_font(cr, layout, desc, arg); return NULL;
 
 	case OP_GROW:
@@ -697,11 +680,11 @@ make_item(enum op_type op, const char *arg, struct act *act,
 		return NULL;
 
 	case OP_IMG:
-		item = op_img(act, arg, bg, *margin, *padding);
+		item = op_img(act, arg, *margin, *padding);
 		break;
 
 	case OP_RULE:
-		item = op_rule(act, fg, bg, layout, *margin, *padding);
+		item = op_rule(act, fg, layout, *margin, *padding);
 		if (*grow == 0.0) {
 			*grow = 10.0; /* TODO: something sensible for OP_RULE */
 		}
@@ -709,18 +692,20 @@ make_item(enum op_type op, const char *arg, struct act *act,
 
 	/* pango markup: https://developer.gnome.org/pango/stable/PangoMarkupFormat.html */
 	case OP_MARKUP:
-		item = op_text(act, layout, arg, fg, bg, *margin, *padding,
+		item = op_text(act, layout, arg, fg, *margin, *padding,
 			pango_layout_set_markup);
 		break;
 
 	case OP_TEXT:
-		item = op_text(act, layout, arg, fg, bg, *margin, *padding,
+		item = op_text(act, layout, arg, fg, *margin, *padding,
 			pango_layout_set_text);
 		break;
 
 	default:
 		assert(!"unreached");
 	}
+
+	act->bg = *bg;
 
 	if (!isnan(flex_item_get_width(item))) {
 		flex_item_set_grow(item, *grow);
