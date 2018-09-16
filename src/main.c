@@ -5,6 +5,7 @@
  */
 
 #define _XOPEN_SOURCE 500
+#define _DEFAULT_SOURCE
 
 #include <sys/types.h>
 
@@ -30,6 +31,8 @@
 #define MAX_LINE_LEN 8192
 
 enum op_type {
+	OP_OPEN,
+	OP_CLOSE,
 	OP_BG,
 	OP_FG,
 	OP_FONT,
@@ -607,7 +610,7 @@ parse_op(char *p, enum op_type *op, char **arg)
 			break;
 		}
 
-		/* TODO: open/close flex container */
+		*op = *p == '{' ? OP_OPEN : OP_CLOSE;
 
 		p++;
 		break;
@@ -650,79 +653,6 @@ parse_op(char *p, enum op_type *op, char **arg)
 	}
 
 	return p;
-}
-
-static struct flex_item *
-make_item(enum op_type op, const char *arg, struct act *act,
-	cairo_t *cr, PangoLayout *layout,
-	PangoColor *fg, PangoColor *bg, PangoFontDescription **desc,
-	double *grow, double *margin, double *padding)
-{
-	struct flex_item *item;
-
-	assert(arg != NULL);
-	assert(act != NULL);
-	assert(layout != NULL);
-	assert(fg != NULL);
-	assert(bg != NULL);
-	assert(desc != NULL);
-	assert(grow != NULL);
-	assert(margin != NULL);
-	assert(padding != NULL);
-
-	switch (op) {
-	case OP_BG:     *bg = op_color(arg);            return NULL;
-	case OP_FG:     *fg = op_color(arg);            return NULL;
-	case OP_FONT:   op_font(cr, layout, desc, arg); return NULL;
-
-	case OP_GROW:
-		*grow = strtod(arg, NULL); /* XXX */
-		return NULL;
-
-	case OP_IMG:
-		item = op_img(act, arg, *margin, *padding);
-		break;
-
-	case OP_RULE:
-		item = op_rule(act, fg, layout, *margin, *padding);
-		if (*grow == 0.0) {
-			*grow = 10.0; /* TODO: something sensible for OP_RULE */
-		}
-		break;
-
-	/* pango markup: https://developer.gnome.org/pango/stable/PangoMarkupFormat.html */
-	case OP_MARKUP:
-		item = op_text(act, layout, arg, fg, *margin, *padding,
-			pango_layout_set_markup);
-		break;
-
-	case OP_TEXT:
-		item = op_text(act, layout, arg, fg, *margin, *padding,
-			pango_layout_set_text);
-		break;
-
-	default:
-		assert(!"unreached");
-	}
-
-	act->bg = *bg;
-
-	if (!isnan(flex_item_get_width(item))) {
-		flex_item_set_grow(item, *grow);
-		*grow = 0.0;
-	}
-
-	flex_item_set_margin_top(item, *margin);
-	flex_item_set_margin_left(item, *margin);
-	flex_item_set_margin_bottom(item, *margin);
-	flex_item_set_margin_right(item, *margin);
-
-	flex_item_set_padding_top(item, *padding);
-	flex_item_set_padding_left(item, *padding);
-	flex_item_set_padding_bottom(item, *padding);
-	flex_item_set_padding_right(item, *padding);
-
-	return item;
 }
 
 int
@@ -817,9 +747,9 @@ main(int argc, char **argv)
 			exit(1);
 		}
 
-		arg = p = buf;
+		p = buf;
 
-		while (p = parse_op(p, &op, &arg), p != NULL) {
+		while (arg = p, p = parse_op(p, &op, &arg), p != NULL) {
 			struct flex_item *item;
 			char tmp;
 
@@ -828,22 +758,105 @@ main(int argc, char **argv)
 				*p = '\0';
 			}
 
-			item = make_item(op, arg, &b[n],
-				cr, layout,
-				&fg, &bg, &desc,
-				&grow, &margin, &padding);
+			switch (op) {
+			case OP_OPEN:
+				item = flex_item_new();
 
-			if (item != NULL) {
-				b[n].item = item;
-				flex_item_add(root, b[n].item);
-				n++;
+				flex_item_set_width(item,  flex_item_get_width(root));
+				flex_item_set_height(item, flex_item_get_height(root));
+
+				if (!isnan(flex_item_get_width(item))) {
+					flex_item_set_grow(item, grow);
+					grow = 0.0;
+				}
+
+				flex_item_set_margin_top(item, margin);
+				flex_item_set_margin_left(item, margin);
+				flex_item_set_margin_bottom(item, margin);
+				flex_item_set_margin_right(item, margin);
+
+				flex_item_set_padding_top(item, padding);
+				flex_item_set_padding_left(item, padding);
+				flex_item_set_padding_bottom(item, padding);
+				flex_item_set_padding_right(item, padding);
+
+				flex_item_add(root, item);
+
+				root = item;
+				continue;
+
+			case OP_CLOSE:
+				root = flex_item_parent(root);
+				if (root == NULL) {
+					fprintf(stderr, "syntax error: unbalanced '}'\n");
+					exit(1);
+				}
+				continue;
+
+			case OP_BG:     bg = op_color(arg);              continue;
+			case OP_FG:     fg = op_color(arg);              continue;
+			case OP_FONT:   op_font(cr, layout, &desc, arg); continue;
+
+			case OP_GROW:
+				grow = strtod(arg, NULL); /* XXX */
+				continue;
+
+			case OP_IMG:
+				item = op_img(&b[n], arg, margin, padding);
+				break;
+
+			case OP_RULE:
+				item = op_rule(&b[n], &fg, layout, margin, padding);
+				if (grow == 0.0) {
+					grow = 10.0; /* TODO: something sensible for OP_RULE */
+				}
+				break;
+
+			/* pango markup: https://developer.gnome.org/pango/stable/PangoMarkupFormat.html */
+			case OP_MARKUP:
+				item = op_text(&b[n], layout, arg, &fg, margin, padding,
+					pango_layout_set_markup);
+				break;
+
+			case OP_TEXT:
+				item = op_text(&b[n], layout, arg, &fg, margin, padding,
+					pango_layout_set_text);
+				break;
+
+			default:
+				assert(!"unreached");
 			}
+
+			b[n].bg = bg;
+
+			if (!isnan(flex_item_get_width(item))) {
+				flex_item_set_grow(item, grow);
+				grow = 0.0;
+			}
+
+			b[n].item = item;
+			n++;
+
+			flex_item_set_margin_top(item, margin);
+			flex_item_set_margin_left(item, margin);
+			flex_item_set_margin_bottom(item, margin);
+			flex_item_set_margin_right(item, margin);
+
+			flex_item_set_padding_top(item, padding);
+			flex_item_set_padding_left(item, padding);
+			flex_item_set_padding_bottom(item, padding);
+			flex_item_set_padding_right(item, padding);
+
+			flex_item_add(root, item);
 
 			if (op == OP_TEXT) {
 				*p = tmp;
 			}
+		}
 
-			arg = p;
+		if (flex_item_parent(root) != NULL) {
+			fprintf(stderr, "syntax error: unbalanced '{'\n");
+			exit(1);
 		}
 	}
 
