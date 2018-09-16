@@ -5,17 +5,17 @@
  */
 
 #define _XOPEN_SOURCE 500
-#define _DEFAULT_SOURCE
 
 #include <sys/types.h>
 
 #include <assert.h>
 #include <stdbool.h>
+#include <limits.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <limits.h>
+#include <errno.h>
 #include <math.h>
 
 #include <xcb/xcb.h>
@@ -36,7 +36,15 @@ enum op_type {
 	OP_BG,
 	OP_FG,
 	OP_FONT,
+	OP_DIR,
+	OP_WRAP,
+	OP_JUSTIFY_CONTENT,
+	OP_ALIGN_ITEMS,
+	OP_ALIGN_SELF,
+	OP_SHRINK,
+	OP_ORDER,
 	OP_GROW,
+	OP_BASIS,
 	OP_IMG,
 	OP_RULE,
 	OP_MARKUP,
@@ -95,6 +103,60 @@ struct act {
 	} u;
 };
 
+static float
+flex_strtof(const char *s, float min, float max)
+{
+	float x;
+	char *e;
+
+	assert(s != NULL);
+
+	errno = 0;
+	x = strtof(s, &e);
+	if (s[0] == '\0' || *e != '\0') {
+		fprintf(stderr, "%s: invalid float\n", s);
+	}
+
+	if (x == HUGE_VALF && errno != 0) {
+		perror(s);
+		exit(1);
+	}
+
+	if (x < min || x > max) {
+		fprintf(stderr, "%s: out of range\n", s);
+		exit(1);
+	}
+
+	return x;
+}
+
+static int
+flex_strtoi(const char *s, int min, int max)
+{
+	long l;
+	char *e;
+
+	assert(s != NULL);
+
+	errno = 0;
+	l = strtol(s, &e, 10);
+	if (s[0] == '\0' || *e != '\0') {
+		fprintf(stderr, "%s: invalid integer\n", s);
+	}
+
+	if ((l == LONG_MIN || l == LONG_MAX) && errno == ERANGE) {
+		perror(s);
+		exit(1);
+	}
+
+	if (l < INT_MIN || l > INT_MAX || l < min || l > max) {
+		fprintf(stderr, "%s: out of range\n", s);
+		exit(1);
+	}
+
+	return (int) l;
+}
+
 /* frame coordinates contain the padding but not the margins */
 static struct geom
 flex_item_get_frame(struct flex_item *item)
@@ -141,32 +203,155 @@ flex_item_get_padding(struct flex_item *item)
 	return o;
 }
 
-static enum op_type
-op_name(const char *cmd)
+static flex_direction
+dir_name(const char *name)
 {
 	size_t i;
 
+	struct {
+		const char *name;
+		flex_direction dir;
+	} a[] = {
+		{ "row",     FLEX_DIRECTION_ROW            },
+		{ "row-rev", FLEX_DIRECTION_ROW_REVERSE    },
+		{ "col",     FLEX_DIRECTION_COLUMN         },
+		{ "col-rev", FLEX_DIRECTION_COLUMN_REVERSE }
+	};
+
+	assert(name != NULL);
+
+	for (i = 0; i < sizeof a / sizeof *a; i++) {
+		if (0 == strcmp(a[i].name, name)) {
+			return a[i].dir;
+		}
+	}
+
+	fprintf(stderr, "%s: unrecognised direction\n", name);
+	exit(1);
+}
+
+static flex_wrap
+wrap_name(const char *name)
+{
+	size_t i;
+
+	struct {
+		const char *name;
+		flex_wrap wrap;
+	} a[] = {
+		{ "no-wrap",  FLEX_WRAP_NO_WRAP      },
+		{ "wrap",     FLEX_WRAP_WRAP         },
+		{ "wrap-rev", FLEX_WRAP_WRAP_REVERSE }
+	};
+
+	assert(name != NULL);
+
+	for (i = 0; i < sizeof a / sizeof *a; i++) {
+		if (0 == strcmp(a[i].name, name)) {
+			return a[i].wrap;
+		}
+	}
+
+	fprintf(stderr, "%s: unrecognised wrap\n", name);
+	exit(1);
+}
+
+static flex_align
+justify_content_name(const char *name)
+{
+	size_t i;
+
+	struct {
+		const char *name;
+		flex_align align;
+	} a[] = {
+		{ "start",         FLEX_ALIGN_START         },
+		{ "end",           FLEX_ALIGN_END           },
+		{ "center",        FLEX_ALIGN_CENTER        },
+		{ "space-between", FLEX_ALIGN_SPACE_BETWEEN },
+		{ "space-around",  FLEX_ALIGN_SPACE_AROUND  },
+		{ "space-evenly",  FLEX_ALIGN_SPACE_EVENLY  }
+	};
+
+	assert(name != NULL);
+
+	for (i = 0; i < sizeof a / sizeof *a; i++) {
+		if (0 == strcmp(a[i].name, name)) {
+			return a[i].align;
+		}
+	}
+
+	fprintf(stderr, "%s: unrecognised justify-content\n", name);
+	exit(1);
+}
+
+static flex_align
+align_name(const char *name)
+{
+	size_t i;
+
+	struct {
+		const char *name;
+		flex_align align;
+	} a[] = {
+		{ "auto",     FLEX_ALIGN_AUTO     },
+		{ "start",    FLEX_ALIGN_START    },
+		{ "end",      FLEX_ALIGN_END      },
+		{ "center",   FLEX_ALIGN_CENTER   },
+//		{ "baseline", FLEX_ALIGN_BASELINE }, // not implemented
+		{ "stretch",  FLEX_ALIGN_STRETCH  }
+	};
+
+	assert(name != NULL);
+
+	for (i = 0; i < sizeof a / sizeof *a; i++) {
+		if (0 == strcmp(a[i].name, name)) {
+			return a[i].align;
+		}
+	}
+
+	fprintf(stderr, "%s: unrecognised align-self\n", name);
+	exit(1);
+}
+
+static enum op_type
+op_name(const char *name)
+{
+	size_t i;
+
+	/* "flow" and "flex" are shorthand for compositions of other items */
+
 	static const struct {
-		const char *cmd;
+		const char *name;
 		enum op_type op;
 	} a[] = {
 		{ "bg",     OP_BG     },
 		{ "fg",     OP_FG     },
 		{ "font",   OP_FONT   },
+		{ "dir",    OP_DIR    },
+		{ "wrap",   OP_WRAP   },
+		{ "justify-content", OP_JUSTIFY_CONTENT },
+		{ "align-items",     OP_ALIGN_ITEMS     },
+		{ "align-self",      OP_ALIGN_SELF      },
 		{ "grow",   OP_GROW   },
+		{ "shrink", OP_SHRINK },
+		{ "order",  OP_ORDER  },
+		{ "basis",  OP_BASIS  },
 		{ "img",    OP_IMG    },
 		{ "rule",   OP_RULE   },
 		{ "markup", OP_MARKUP },
 		{ "text",   OP_TEXT   }
 	};
 
+	assert(name != NULL);
+
 	for (i = 0; i < sizeof a / sizeof *a; i++) {
-		if (0 == strcmp(a[i].cmd, cmd)) {
+		if (0 == strcmp(a[i].name, name)) {
 			return a[i].op;
 		}
 	}
 
-	fprintf(stderr, "unrecognised command ^%s\n", cmd);
+	fprintf(stderr, "^%s{}: unrecognised command\n", name);
 	exit(1);
 }
 
@@ -358,7 +543,7 @@ op_img(struct act *act, const char *file,
 	/* TODO: cairo_svg_surface_create(file, ...); */
 
 #ifdef CAIRO_HAS_PNG_FUNCTIONS
-	if (0 == strcasecmp(p, "png")) {
+	if (0 == strcmp(p, "png")) {
 		img = cairo_image_surface_create_from_png(file);
 	} else
 #endif
@@ -713,12 +898,9 @@ main(int argc, char **argv)
 
 	root = flex_item_new();
 
-	flex_item_set_wrap(root, FLEX_WRAP_WRAP);
-
 	flex_item_set_width(root, width);
 	flex_item_set_height(root, height);
 
-	/* flex_item_set_justify_content(root, FLEX_ALIGN_SPACE_BETWEEN); */
 	flex_item_set_align_content(root, FLEX_ALIGN_CENTER);
 	flex_item_set_align_items(root, FLEX_ALIGN_END);
 	flex_item_set_direction(root, FLEX_DIRECTION_ROW);
@@ -728,12 +910,18 @@ main(int argc, char **argv)
 	char buf[MAX_LINE_LEN];
 
 	PangoColor fg, bg;
-	double grow;
+	float shrink, grow, basis;
+	flex_align align_self;
+	int order;
 
 	/* evalator state persists between ops (and over lines) */
 	fg = op_color("white");
 	bg = op_color("black");
-	grow = 0.0;
+	align_self = FLEX_ALIGN_AUTO;
+	grow   = 0.0;
+	shrink = 0.0;
+	order  = 0;
+	basis  = NAN;
 
 	while (fgets(buf, sizeof buf, stdin) != NULL) {
 		enum op_type op;
@@ -761,29 +949,9 @@ main(int argc, char **argv)
 			switch (op) {
 			case OP_OPEN:
 				item = flex_item_new();
-
 				flex_item_set_width(item,  flex_item_get_width(root));
 				flex_item_set_height(item, flex_item_get_height(root));
-
-				if (!isnan(flex_item_get_width(item))) {
-					flex_item_set_grow(item, grow);
-					grow = 0.0;
-				}
-
-				flex_item_set_margin_top(item, margin);
-				flex_item_set_margin_left(item, margin);
-				flex_item_set_margin_bottom(item, margin);
-				flex_item_set_margin_right(item, margin);
-
-				flex_item_set_padding_top(item, padding);
-				flex_item_set_padding_left(item, padding);
-				flex_item_set_padding_bottom(item, padding);
-				flex_item_set_padding_right(item, padding);
-
-				flex_item_add(root, item);
-
-				root = item;
-				continue;
+				break;
 
 			case OP_CLOSE:
 				root = flex_item_parent(root);
@@ -797,9 +965,30 @@ main(int argc, char **argv)
 			case OP_FG:     fg = op_color(arg);              continue;
 			case OP_FONT:   op_font(cr, layout, &desc, arg); continue;
 
-			case OP_GROW:
-				grow = strtod(arg, NULL); /* XXX */
+			case OP_DIR:
+				flex_item_set_direction(root, dir_name(arg));
 				continue;
+
+			case OP_WRAP:
+				flex_item_set_wrap(root, wrap_name(arg));
+				continue;
+
+			case OP_JUSTIFY_CONTENT:
+				flex_item_set_justify_content(root, justify_content_name(arg));
+				continue;
+
+			case OP_ALIGN_ITEMS:
+				flex_item_set_align_items(root, align_name(arg));
+				continue;
+
+			case OP_ALIGN_SELF:
+				align_self = align_name(arg);
+				continue;
+
+			case OP_SHRINK: shrink = flex_strtof(arg, 0, INFINITY); continue;
+			case OP_ORDER:  order  = flex_strtoi(arg, 0, INT_MAX);  continue;
+			case OP_GROW:   grow   = flex_strtof(arg, 0, INFINITY); continue;
+			case OP_BASIS:  basis  = flex_strtof(arg, 0, INFINITY); continue; /* TODO: auto, etc */
 
 			case OP_IMG:
 				item = op_img(&b[n], arg, margin, padding);
@@ -827,15 +1016,22 @@ main(int argc, char **argv)
 				assert(!"unreached");
 			}
 
-			b[n].bg = bg;
+			if (op != OP_OPEN) {
+				b[n].bg   = bg;
+				b[n].item = item;
+				n++;
+			}
 
 			if (!isnan(flex_item_get_width(item))) {
 				flex_item_set_grow(item, grow);
-				grow = 0.0;
+				flex_item_set_shrink(item, shrink);
+				grow   = 0.0;
+				shrink = 0.0;
 			}
 
-			b[n].item = item;
-			n++;
+			flex_item_set_order(item, order);
+			flex_item_set_basis(item, basis);
+			flex_item_set_align_self(item, align_self);
 
 			flex_item_set_margin_top(item, margin);
 			flex_item_set_margin_left(item, margin);
@@ -849,8 +1045,14 @@ main(int argc, char **argv)
 
 			flex_item_add(root, item);
 
+			order = 0;
+
 			if (op == OP_TEXT) {
 				*p = tmp;
+			}
+
+			if (op == OP_OPEN) {
+				root = item;
 			}
 		}
 
