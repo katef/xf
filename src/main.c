@@ -356,28 +356,6 @@ op_name(const char *name)
 }
 
 static void
-draw_frame(cairo_t *cr, const PangoColor *c,
-	const struct geom *f,
-	const struct outline *m, const struct outline *p)
-{
-/*
-	cairo_set_source_rgba(cr, 0.4, 0.4, 1.0, 0.5);
-	cairo_rectangle(cr, f->x - m->l, f->y - m->t, f->w + m->w, f->h + m->h);
-	cairo_fill(cr);
-*/
-
-	cairo_set_source_rgba(cr, c->red, c->green, c->blue, 1.0);
-	cairo_rectangle(cr, f->x, f->y, f->w, f->h);
-	cairo_fill(cr);
-
-/*
-	cairo_set_source_rgba(cr, 1.0, 0.4, 0.4, 0.5);
-	cairo_rectangle(cr, f->x + p->l, f->y + p->t, f->w - p->w, f->h - p->h);
-	cairo_fill(cr);
-*/
-}
-
-static void
 print_modifiers(uint32_t mask)
 {
 	size_t i;
@@ -658,69 +636,6 @@ op_text(struct act *act, PangoLayout *layout, const char *s,
 }
 
 static void
-act_img(cairo_t *cr,
-	const struct geom *f, const struct outline *m, const struct outline *p,
-	const struct act_img *img)
-{
-	assert(cr != NULL);
-	assert(f != NULL);
-	assert(m != NULL);
-	assert(p != NULL);
-	assert(img != NULL);
-
-	cairo_set_source_surface(cr, img->img, f->x + p->l, f->y + p->t);
-
-	cairo_paint(cr);
-}
-
-static void
-act_rule(cairo_t *cr,
-	const struct geom *f, const struct outline *m, const struct outline *p,
-	const struct act_rule *rule)
-{
-	assert(cr != NULL);
-	assert(f != NULL);
-	assert(m != NULL);
-	assert(p != NULL);
-	assert(rule != NULL);
-
-	/* TODO: line style, dashed etc */
-	/* TODO: automatic horizontal/vertical rule */
-
-	cairo_set_source_rgba(cr, rule->fg.red, rule->fg.green, rule->fg.blue, 1.0);
-	cairo_move_to(cr, f->x + p->l, f->y + p->t + ((f->h - p->h) / 2.0));
-	cairo_rel_line_to(cr, f->w - p->w, 0.0);
-	cairo_stroke(cr);
-}
-
-static void
-act_text(cairo_t *cr,
-	const struct geom *f, const struct outline *m, const struct outline *p,
-	const struct act_text *text)
-{
-	assert(cr != NULL);
-	assert(f != NULL);
-	assert(m != NULL);
-	assert(p != NULL);
-	assert(text != NULL);
-
-/*
-	int baseline = pango_layout_get_baseline(text->layout);
-
-	cairo_set_source_rgba(cr, text->fg.red * 0.2, text->fg.green * 0.2, text->fg.blue * 0.2, 0.8);
-	cairo_move_to(cr, f->x + p->l, f->y + p->t + (double) baseline / PANGO_SCALE);
-	cairo_rel_line_to(cr, f->w - p->w, 0.0);
-	cairo_stroke(cr);
-*/
-
-	cairo_move_to(cr, f->x + p->l, f->y + p->t);
-
-	cairo_set_source_rgba(cr, text->fg.red, text->fg.green, text->fg.blue, 1.0);
-
-	pango_cairo_show_layout(cr, text->layout);
-}
-
-static void
 paint(cairo_t *cr, struct flex_item *root, struct act *b, size_t n)
 {
 	unsigned i;
@@ -744,19 +659,53 @@ paint(cairo_t *cr, struct flex_item *root, struct act *b, size_t n)
 		m = flex_item_get_margin(b[i].item);
 		p = flex_item_get_padding(b[i].item);
 
-		draw_frame(cr, &b[i].bg, &f, &m, &p);
+		(void) m;
+
+/*
+		cairo_set_source_rgba(cr, 0.4, 0.4, 1.0, 0.5);
+		cairo_rectangle(cr, f.x - m.l, f.y - m.t, f.w + m.w, f.h + m.h);
+		cairo_fill(cr);
+*/
+
+		cairo_set_source_rgba(cr, b[i].bg.red, b[i].bg.green, b[i].bg.blue, 1.0);
+		cairo_rectangle(cr, f.x, f.y, f.w, f.h);
+		cairo_fill(cr);
+
+/*
+		cairo_set_source_rgba(cr, 1.0, 0.4, 0.4, 0.5);
+		cairo_rectangle(cr, f.x + p.l, f.y + p.t, f.w - p.w, f.h - p.h);
+		cairo_fill(cr);
+*/
 
 		switch (b[i].type) {
 		case ACT_IMG:
-			act_img(cr, &f, &m, &p, &b[i].u.img);
+			cairo_set_source_surface(cr, b[i].u.img.img, f.x + p.l, f.y + p.t);
+			cairo_paint(cr);
 			break;
 
 		case ACT_RULE:
-			act_rule(cr, &f, &m, &p, &b[i].u.hr);
+			/* TODO: line style, dashed etc */
+			/* TODO: automatic horizontal/vertical rule */
+
+			cairo_set_source_rgba(cr, b[i].u.hr.fg.red, b[i].u.hr.fg.green, b[i].u.hr.fg.blue, 1.0);
+			cairo_move_to(cr, f.x + p.l, f.y + p.t + ((f.h - p.h) / 2.0));
+			cairo_rel_line_to(cr, f.w - p.w, 0.0);
+			cairo_stroke(cr);
 			break;
 
 		case ACT_TEXT:
-			act_text(cr, &f, &m, &p, &b[i].u.text);
+/*
+			int baseline = pango_layout_get_baseline(b[i].u.text.layout);
+
+			cairo_set_source_rgba(cr, b[i].u.text.fg.red * 0.2, b[i].u.text.fg.green * 0.2, b[i].u.text.fg.blue * 0.2, 0.8);
+			cairo_move_to(cr, f.x + p.l, f.y + p.t + (double) baseline / PANGO_SCALE);
+			cairo_rel_line_to(cr, f.w - p.w, 0.0);
+			cairo_stroke(cr);
+*/
+
+			cairo_move_to(cr, f.x + p.l, f.y + p.t);
+			cairo_set_source_rgba(cr, b[i].u.text.fg.red, b[i].u.text.fg.green, b[i].u.text.fg.blue, 1.0);
+			pango_cairo_show_layout(cr, b[i].u.text.layout);
 			break;
 
 		default:
