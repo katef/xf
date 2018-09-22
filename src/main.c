@@ -38,6 +38,7 @@ enum op_type {
 	OP_FONT,
 	OP_DIR,
 	OP_WRAP,
+	OP_ELLIPSIZE,
 	OP_JUSTIFY_CONTENT,
 	OP_ALIGN_ITEMS,
 	OP_ALIGN_SELF,
@@ -203,6 +204,33 @@ flex_item_get_padding(struct flex_item *item)
 	return o;
 }
 
+static PangoEllipsizeMode
+ellipsize_name(const char *name)
+{
+	size_t i;
+
+	struct {
+		const char *name;
+		PangoEllipsizeMode e;
+	} a[] = {
+		{ "none",   PANGO_ELLIPSIZE_NONE   },
+		{ "start",  PANGO_ELLIPSIZE_START  },
+		{ "middle", PANGO_ELLIPSIZE_MIDDLE },
+		{ "end",    PANGO_ELLIPSIZE_END    }
+	};
+
+	assert(name != NULL);
+
+	for (i = 0; i < sizeof a / sizeof *a; i++) {
+		if (0 == strcmp(a[i].name, name)) {
+			return a[i].e;
+		}
+	}
+
+	fprintf(stderr, "%s: unrecognised ellipsize mode\n", name);
+	exit(1);
+}
+
 static flex_direction
 dir_name(const char *name)
 {
@@ -330,6 +358,7 @@ op_name(const char *name)
 		{ "font",   OP_FONT   },
 		{ "dir",    OP_DIR    },
 		{ "wrap",   OP_WRAP   },
+		{ "ellipsize",       OP_ELLIPSIZE       },
 		{ "justify-content", OP_JUSTIFY_CONTENT },
 		{ "align-items",     OP_ALIGN_ITEMS     },
 		{ "align-self",      OP_ALIGN_SELF      },
@@ -495,6 +524,16 @@ op_font(cairo_t *cr, PangoLayout *layout, PangoFontDescription **desc, const cha
 	*desc = pango_font_description_from_string(s);
 
 	pango_layout_set_font_description(layout, *desc);
+}
+
+static void
+op_ellipsize(cairo_t *cr, PangoLayout *layout, const char *s)
+{
+	assert(cr != NULL);
+	assert(layout != NULL);
+	assert(s != NULL);
+
+	pango_layout_set_ellipsize(layout, ellipsize_name(s));
 }
 
 static struct flex_item *
@@ -703,6 +742,8 @@ paint(cairo_t *cr, struct flex_item *root, struct act *b, size_t n)
 			cairo_stroke(cr);
 */
 
+			/* TODO: need to re-layout text if the width changed due to flex_layout */
+
 			cairo_move_to(cr, f.x + p.l, f.y + p.t);
 			cairo_set_source_rgba(cr, b[i].u.text.fg.red, b[i].u.text.fg.green, b[i].u.text.fg.blue, 1.0);
 			pango_cairo_show_layout(cr, b[i].u.text.layout);
@@ -910,9 +951,10 @@ main(int argc, char **argv)
 				}
 				continue;
 
-			case OP_BG:     bg = op_color(arg);              continue;
-			case OP_FG:     fg = op_color(arg);              continue;
-			case OP_FONT:   op_font(cr, layout, &desc, arg); continue;
+			case OP_BG:        bg = op_color(arg);              continue;
+			case OP_FG:        fg = op_color(arg);              continue;
+			case OP_FONT:      op_font(cr, layout, &desc, arg); continue;
+			case OP_ELLIPSIZE: op_ellipsize(cr, layout, arg);   continue;
 
 			case OP_DIR:
 				flex_item_set_direction(root, dir_name(arg));
