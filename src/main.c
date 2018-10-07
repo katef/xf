@@ -44,6 +44,7 @@ enum format {
 enum op_type {
 	OP_OPEN,
 	OP_CLOSE,
+	OP_CA,
 	OP_BG,
 	OP_FG,
 	OP_FONT,
@@ -98,6 +99,7 @@ struct act {
 
 	struct flex_item *item;
 	PangoColor bg;
+	const char *ca_name;
 
 	union {
 		struct act_img {
@@ -257,6 +259,22 @@ flex_item_get_padding(struct flex_item *item)
 	return o;
 }
 
+static bool
+inside(const struct geom *g, double x, double y)
+{
+	assert(g != NULL);
+
+	if (x < g->x || x > g->x + g->w) {
+		return false;
+	}
+
+	if (y < g->y || y > g->y + g->h) {
+		return false;
+	}
+
+	return true;
+}
+
 static PangoEllipsizeMode
 ellipsize_name(const char *name)
 {
@@ -406,6 +424,7 @@ op_name(const char *name)
 		const char *name;
 		enum op_type op;
 	} a[] = {
+		{ "ca",     OP_CA     },
 		{ "bg",     OP_BG     },
 		{ "fg",     OP_FG     },
 		{ "font",   OP_FONT   },
@@ -450,7 +469,7 @@ print_modifiers(uint32_t mask)
 
 	for (i = 0; mask; mask >>= 1, i++) {
 		if (mask & 1) {
-			printf(a[i]);
+			printf(" %s", a[i]);
 		}
 	}
 }
@@ -995,6 +1014,7 @@ main(int argc, char **argv)
 	float shrink, grow, basis;
 	flex_align align_self;
 	int order;
+	const char *ca_name;
 
 	/* evalator state persists between ops (and over lines) */
 	fg = op_color("white");
@@ -1004,6 +1024,7 @@ main(int argc, char **argv)
 	shrink = 0.0;
 	order  = 0;
 	basis  = NAN;
+	ca_name = NULL;
 
 	while (fgets(buf, sizeof buf, stdin) != NULL) {
 		enum op_type op;
@@ -1043,6 +1064,7 @@ main(int argc, char **argv)
 				}
 				continue;
 
+			case OP_CA:        ca_name = arg;                   continue;
 			case OP_BG:        bg = op_color(arg);              continue;
 			case OP_FG:        fg = op_color(arg);              continue;
 			case OP_FONT:      op_font(cr, layout, &desc, arg); continue;
@@ -1078,6 +1100,10 @@ main(int argc, char **argv)
 				break;
 
 			case OP_RULE:
+				if (ca_name != NULL) {
+					fprintf(stderr, "^rule{} is a non-clickable area\n");
+					exit(1);
+				}
 				item = op_rule(&b[n], &fg, layout, margin, padding);
 				if (grow == 0.0) {
 					grow = 10.0; /* TODO: something sensible for OP_RULE */
@@ -1100,16 +1126,18 @@ main(int argc, char **argv)
 			}
 
 			if (op != OP_OPEN) {
-				b[n].bg   = bg;
-				b[n].item = item;
+				b[n].bg      = bg;
+				b[n].item    = item;
+				b[n].ca_name = ca_name;
 				n++;
 			}
 
 			if (!isnan(flex_item_get_width(item))) {
 				flex_item_set_grow(item, grow);
 				flex_item_set_shrink(item, shrink);
-				grow   = 0.0;
-				shrink = 0.0;
+				grow    = 0.0;
+				shrink  = 0.0;
+				ca_name = NULL;
 				/* TODO: reset align-self too */
 			}
 
@@ -1194,9 +1222,26 @@ main(int argc, char **argv)
 
 		case XCB_BUTTON_PRESS: {
 			xcb_button_press_event_t *press = (xcb_button_press_event_t *) e;
-			fprintf(stderr, "button %d", press->detail);
-			print_modifiers(press->state);
-			fprintf(stderr, "\n");
+			unsigned i;
+
+			for (i = 0; i < n; i++) {
+				struct geom f;
+
+				if (b[i].ca_name == NULL) {
+					continue;
+				}
+
+				f = flex_item_get_frame(b[i].item);
+
+				if (!inside(&f, press->event_x, press->event_y)) {
+					continue;
+				}
+
+				fprintf(stderr, "%s %d", b[i].ca_name, press->detail);
+				print_modifiers(press->state);
+				fprintf(stderr, "\n");
+			}
+
 			break;
 		}
 
