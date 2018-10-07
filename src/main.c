@@ -18,10 +18,14 @@
 #include <errno.h>
 #include <math.h>
 
+#include <unistd.h>
+
 #include <xcb/xcb.h>
 #include <xcb/xcb_ewmh.h>
 
 #include <cairo.h>
+#include <cairo-pdf.h>
+#include <cairo-svg.h>
 #include <cairo-xcb.h>
 
 #include <pango/pangocairo.h>
@@ -29,6 +33,13 @@
 #include <flex.h>
 
 #define MAX_LINE_LEN 8192
+
+enum format {
+	FMT_PDF,
+	FMT_PNG,
+	FMT_SVG,
+	FMT_XCB,
+};
 
 enum op_type {
 	OP_OPEN,
@@ -103,6 +114,48 @@ struct act {
 		} text;
 	} u;
 };
+
+static enum format
+ext(const char *file)
+{
+	const char *p;
+	size_t i;
+
+	struct {
+		const char *ext;
+		enum format fmt;
+	} a[] = {
+		{ "pdf", FMT_PDF },
+		{ "png", FMT_PNG },
+		{ "svg", FMT_SVG }
+	};
+
+	assert(file != NULL);
+
+	p = strrchr(file, '.');
+	if (p == NULL) {
+		fprintf(stderr, "%s: file extension not found\n", file);
+		exit(1);
+	}
+
+	p++;
+
+	for (i = 0; i < sizeof a / sizeof *a; i++) {
+		if (0 == strcmp(a[i].ext, p)) {
+			return a[i].fmt;
+		}
+	}
+
+	fprintf(stderr, "unrecognised file extension. supported formats are:");
+
+	for (i = 0; i < sizeof a / sizeof *a; i++) {
+		fprintf(stderr, " %s", a[i].ext);
+	}
+
+	fprintf(stderr, "\n");
+
+	exit(1);
+}
 
 static float
 flex_strtof(const char *s, float min, float max)
@@ -543,31 +596,27 @@ op_img(struct act *act, const char *file,
 	struct flex_item *item;
 	int width, height;
 	cairo_surface_t *img;
-	const char *p;
 
 	assert(act != NULL);
 	assert(file != NULL);
 
-	p = strrchr(file, '.');
-	if (p == NULL) {
-		fprintf(stderr, "%s: file extension not found\n", file);
-		exit(1);
-	}
-
-	p++;
-
-	/* TODO: s/^~/$HOME/ */
-	/* TODO: cairo_svg_surface_create(file, ...); */
-
-#ifdef CAIRO_HAS_PNG_FUNCTIONS
-	if (0 == strcmp(p, "png")) {
+	switch (ext(file)) {
+	case FMT_PNG:
 		img = cairo_image_surface_create_from_png(file);
-	} else
-#endif
-	{
+		break;
+
+/*
+	case FMT_SVG:
+		img = cairo_svg_surface_create(file, TODO);
+		break;
+*/
+
+	default:
 		fprintf(stderr, "%s: unsupported file extension\n", file);
 		exit(1);
 	}
+
+	/* TODO: s/^~/$HOME/ */
 
 	act->type = ACT_IMG;
 
@@ -848,26 +897,69 @@ main(int argc, char **argv)
 	xcb_screen_t *screen;
 	xcb_visualtype_t *visual;
 	int screen_number;
+	const char *of;
+	enum format format;
 
+	width   = 0;
+	height  = 0;
 	margin  = 0;
 	padding = 0;
 
-	xcb = xcb_connect(NULL, &screen_number);
+	of = NULL;
+	format = FMT_XCB;
 
-	xcb_intern_atom_cookie_t *cookie = xcb_ewmh_init_atoms(xcb, &ewmh);
-	xcb_ewmh_init_atoms_replies(&ewmh, cookie, NULL);
+	{
+		int c;
 
-	screen = screen_of_display(xcb, screen_number);
-	visual = visual_of_screen(xcb, screen, screen->root_visual);
+		while (c = getopt(argc, argv, "w:h:o:"), c != -1) {
+			switch (c) {
+			case 'h': height = atoi(optarg); break; /* XXX: range */
+			case 'w': width  = atoi(optarg); break;
 
-	width  = screen->width_in_pixels;
-	height = 20;
+			case 'o':
+				of = optarg;
+				format = ext(of);
+				break;
 
-	/* TODO: title */
-	win = win_create(xcb, &ewmh, screen, width, height, "hello");
+			case '?':
+			default:
+				exit(1);
+			}
+		}
 
-	surface = cairo_xcb_surface_create(xcb, win, visual, width, height);
-	cairo_xcb_surface_set_size(surface, width, height);
+		argc -= optind;
+		argv += optind;
+	}
+
+	if (height == 0) {
+		height = 20; /* XXX: default from discovered height */
+	}
+
+	switch (format) {
+	case FMT_PDF: surface = cairo_pdf_surface_create(of, width, height); break;
+	case FMT_PNG: surface = cairo_image_surface_create(
+	                        	CAIRO_FORMAT_ARGB32, width, height);     break;
+	case FMT_SVG: surface = cairo_svg_surface_create(of, width, height); break;
+
+	case FMT_XCB:
+		xcb = xcb_connect(NULL, &screen_number);
+
+		xcb_intern_atom_cookie_t *cookie = xcb_ewmh_init_atoms(xcb, &ewmh);
+		xcb_ewmh_init_atoms_replies(&ewmh, cookie, NULL);
+
+		screen = screen_of_display(xcb, screen_number);
+		visual = visual_of_screen(xcb, screen, screen->root_visual);
+
+		if (width == 0) {
+			width  = screen->width_in_pixels;
+		}
+
+		/* TODO: title */
+		win = win_create(xcb, &ewmh, screen, width, height, "hello");
+
+		surface = cairo_xcb_surface_create(xcb, win, visual, width, height);
+		cairo_xcb_surface_set_size(surface, width, height);
+	}
 
 	cr = cairo_create(surface);
 
@@ -1018,6 +1110,7 @@ main(int argc, char **argv)
 				flex_item_set_shrink(item, shrink);
 				grow   = 0.0;
 				shrink = 0.0;
+				/* TODO: reset align-self too */
 			}
 
 			flex_item_set_order(item, order);
@@ -1055,6 +1148,24 @@ main(int argc, char **argv)
 
 	pango_font_description_free(desc);
 	g_object_unref(layout);
+
+	switch (format) {
+	case FMT_PDF:
+	case FMT_PNG:
+	case FMT_SVG:
+		paint(cr, root, b, n);
+		if (format == FMT_PNG) {
+			cairo_surface_write_to_png(surface, of);
+		}
+		flex_item_free(root);
+		cairo_destroy(cr);
+		cairo_surface_destroy(surface);
+		exit(0);
+
+	case FMT_XCB:
+		paint(cr, root, b, n);
+		break;
+	}
 
 	xcb_generic_event_t *e;
 
