@@ -105,6 +105,7 @@ struct eval_state {
 	float basis;
 	int order;
 	const char *ca_name;
+	PangoFontDescription *desc;
 };
 
 struct act {
@@ -917,7 +918,6 @@ main(int argc, char **argv)
 	cairo_surface_t *surface;
 	cairo_t *cr;
 	PangoLayout *layout;
-	PangoFontDescription *desc;
 	struct act b[50];
 	size_t n;
 	struct flex_item *root;
@@ -995,9 +995,6 @@ main(int argc, char **argv)
 	cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
 
 	layout = pango_cairo_create_layout(cr);
-	desc = NULL;
-
-	op_font(cr, layout, &desc, "Sans");
 
 	/* pango_layout_set_width(layout, width * PANGO_SCALE); */
 	pango_layout_set_height(layout, height * PANGO_SCALE);
@@ -1006,15 +1003,6 @@ main(int argc, char **argv)
 
 	PangoContext *pctx = pango_layout_get_context(layout);
 	pango_context_set_base_gravity(pctx, PANGO_GRAVITY_SOUTH);
-
-	root = flex_item_new();
-
-	flex_item_set_width(root, width);
-	flex_item_set_height(root, height);
-
-	flex_item_set_align_content(root, FLEX_ALIGN_CENTER);
-	flex_item_set_align_items(root, FLEX_ALIGN_END);
-	flex_item_set_direction(root, FLEX_DIRECTION_ROW);
 
 	n = 0;
 
@@ -1044,6 +1032,18 @@ main(int argc, char **argv)
 		state.basis   = NAN;
 		state.order   = 0;
 		state.ca_name = NULL;
+		state.desc    = NULL;
+
+		op_font(cr, layout, &state.desc, "Sans");
+
+		root = flex_item_new();
+
+		flex_item_set_width(root, width);
+		flex_item_set_height(root, height);
+
+		flex_item_set_align_content(root, FLEX_ALIGN_CENTER);
+		flex_item_set_align_items(root, FLEX_ALIGN_END);
+		flex_item_set_direction(root, FLEX_DIRECTION_ROW);
 
 		p = buf;
 
@@ -1071,11 +1071,11 @@ main(int argc, char **argv)
 				}
 				continue;
 
-			case OP_CA:        state.ca_name = arg;             continue;
-			case OP_BG:        state.bg = op_color(arg);        continue;
-			case OP_FG:        state.fg = op_color(arg);        continue;
-			case OP_FONT:      op_font(cr, layout, &desc, arg); continue;
-			case OP_ELLIPSIZE: op_ellipsize(cr, layout, arg);   continue;
+			case OP_CA:        state.ca_name = arg;                   continue;
+			case OP_BG:        state.bg = op_color(arg);              continue;
+			case OP_FG:        state.fg = op_color(arg);              continue;
+			case OP_FONT:      op_font(cr, layout, &state.desc, arg); continue;
+			case OP_ELLIPSIZE: op_ellipsize(cr, layout, arg);         continue;
 
 			case OP_DIR:
 				flex_item_set_direction(root, dir_name(arg));
@@ -1179,9 +1179,14 @@ main(int argc, char **argv)
 			fprintf(stderr, "syntax error: unbalanced '{'\n");
 			exit(1);
 		}
+
+		/* TODO: dispatch */
+
+		/* TODO: destroy flex node tree */
+
+		pango_font_description_free(state.desc);
 	}
 
-	pango_font_description_free(desc);
 	g_object_unref(layout);
 
 	switch (format) {
