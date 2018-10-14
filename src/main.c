@@ -94,6 +94,19 @@ struct outline {
 	double h;
 };
 
+struct eval_state {
+	double margin;
+	double padding;
+	PangoColor fg;
+	PangoColor bg;
+	flex_align align_self;
+	float grow;
+	float shrink;
+	float basis;
+	int order;
+	const char *ca_name;
+};
+
 struct act {
 	enum act_type type;
 
@@ -909,7 +922,6 @@ main(int argc, char **argv)
 	size_t n;
 	struct flex_item *root;
 	int height, width;
-	double margin, padding;
 	xcb_window_t win;
 	xcb_connection_t *xcb;
 	xcb_ewmh_connection_t ewmh;
@@ -921,8 +933,6 @@ main(int argc, char **argv)
 
 	width   = 0;
 	height  = 0;
-	margin  = 0;
-	padding = 0;
 
 	of = NULL;
 	format = FMT_XCB;
@@ -1010,23 +1020,8 @@ main(int argc, char **argv)
 
 	char buf[MAX_LINE_LEN];
 
-	PangoColor fg, bg;
-	float shrink, grow, basis;
-	flex_align align_self;
-	int order;
-	const char *ca_name;
-
-	/* evalator state persists between ops (and over lines) */
-	fg = op_color("white");
-	bg = op_color("black");
-	align_self = FLEX_ALIGN_AUTO;
-	grow   = 0.0;
-	shrink = 0.0;
-	order  = 0;
-	basis  = NAN;
-	ca_name = NULL;
-
 	while (fgets(buf, sizeof buf, stdin) != NULL) {
+		struct eval_state state;
 		enum op_type op;
 		char *arg;
 		char *p;
@@ -1037,6 +1032,18 @@ main(int argc, char **argv)
 			fprintf(stderr, "buffer overflow\n");
 			exit(1);
 		}
+
+		/* evaluator state persists between ops, reset for each line */
+		state.margin  = 0;
+		state.padding = 0;
+		state.fg      = op_color("white");
+		state.bg      = op_color("black");
+		state.align_self = FLEX_ALIGN_AUTO;
+		state.grow    = 0.0;
+		state.shrink  = 0.0;
+		state.basis   = NAN;
+		state.order   = 0;
+		state.ca_name = NULL;
 
 		p = buf;
 
@@ -1064,9 +1071,9 @@ main(int argc, char **argv)
 				}
 				continue;
 
-			case OP_CA:        ca_name = arg;                   continue;
-			case OP_BG:        bg = op_color(arg);              continue;
-			case OP_FG:        fg = op_color(arg);              continue;
+			case OP_CA:        state.ca_name = arg;             continue;
+			case OP_BG:        state.bg = op_color(arg);        continue;
+			case OP_FG:        state.fg = op_color(arg);        continue;
 			case OP_FONT:      op_font(cr, layout, &desc, arg); continue;
 			case OP_ELLIPSIZE: op_ellipsize(cr, layout, arg);   continue;
 
@@ -1087,37 +1094,37 @@ main(int argc, char **argv)
 				continue;
 
 			case OP_ALIGN_SELF:
-				align_self = align_name(arg);
+				state.align_self = align_name(arg);
 				continue;
 
-			case OP_SHRINK: shrink = flex_strtof(arg, 0, INFINITY); continue;
-			case OP_ORDER:  order  = flex_strtoi(arg, 0, INT_MAX);  continue;
-			case OP_GROW:   grow   = flex_strtof(arg, 0, INFINITY); continue;
-			case OP_BASIS:  basis  = flex_strtof(arg, 0, INFINITY); continue; /* TODO: auto, etc */
+			case OP_SHRINK: state.shrink = flex_strtof(arg, 0, INFINITY); continue;
+			case OP_ORDER:  state.order  = flex_strtoi(arg, 0, INT_MAX);  continue;
+			case OP_GROW:   state.grow   = flex_strtof(arg, 0, INFINITY); continue;
+			case OP_BASIS:  state.basis  = flex_strtof(arg, 0, INFINITY); continue; /* TODO: auto, etc */
 
 			case OP_IMG:
-				item = op_img(&b[n], arg, margin, padding);
+				item = op_img(&b[n], arg, state.margin, state.padding);
 				break;
 
 			case OP_RULE:
-				if (ca_name != NULL) {
+				if (state.ca_name != NULL) {
 					fprintf(stderr, "^rule{} is a non-clickable area\n");
 					exit(1);
 				}
-				item = op_rule(&b[n], &fg, layout, margin, padding);
-				if (grow == 0.0) {
-					grow = 10.0; /* TODO: something sensible for OP_RULE */
+				item = op_rule(&b[n], &state.fg, layout, state.margin, state.padding);
+				if (state.grow == 0.0) {
+					state.grow = 10.0; /* TODO: something sensible for OP_RULE */
 				}
 				break;
 
 			/* pango markup: https://developer.gnome.org/pango/stable/PangoMarkupFormat.html */
 			case OP_MARKUP:
-				item = op_text(&b[n], layout, arg, &fg, margin, padding,
+				item = op_text(&b[n], layout, arg, &state.fg, state.margin, state.padding,
 					pango_layout_set_markup);
 				break;
 
 			case OP_TEXT:
-				item = op_text(&b[n], layout, arg, &fg, margin, padding,
+				item = op_text(&b[n], layout, arg, &state.fg, state.margin, state.padding,
 					pango_layout_set_text);
 				break;
 
@@ -1126,38 +1133,38 @@ main(int argc, char **argv)
 			}
 
 			if (op != OP_OPEN) {
-				b[n].bg      = bg;
+				b[n].bg      = state.bg;
 				b[n].item    = item;
-				b[n].ca_name = ca_name;
+				b[n].ca_name = state.ca_name;
 				n++;
 			}
 
 			if (!isnan(flex_item_get_width(item))) {
-				flex_item_set_grow(item, grow);
-				flex_item_set_shrink(item, shrink);
-				grow    = 0.0;
-				shrink  = 0.0;
-				ca_name = NULL;
+				flex_item_set_grow(item, state.grow);
+				flex_item_set_shrink(item, state.shrink);
+				state.grow    = 0.0;
+				state.shrink  = 0.0;
+				state.ca_name = NULL;
 				/* TODO: reset align-self too */
 			}
 
-			flex_item_set_order(item, order);
-			flex_item_set_basis(item, basis);
-			flex_item_set_align_self(item, align_self);
+			flex_item_set_order(item, state.order);
+			flex_item_set_basis(item, state.basis);
+			flex_item_set_align_self(item, state.align_self);
 
-			flex_item_set_margin_top(item, margin);
-			flex_item_set_margin_left(item, margin);
-			flex_item_set_margin_bottom(item, margin);
-			flex_item_set_margin_right(item, margin);
+			flex_item_set_margin_top(item, state.margin);
+			flex_item_set_margin_left(item, state.margin);
+			flex_item_set_margin_bottom(item, state.margin);
+			flex_item_set_margin_right(item, state.margin);
 
-			flex_item_set_padding_top(item, padding);
-			flex_item_set_padding_left(item, padding);
-			flex_item_set_padding_bottom(item, padding);
-			flex_item_set_padding_right(item, padding);
+			flex_item_set_padding_top(item, state.padding);
+			flex_item_set_padding_left(item, state.padding);
+			flex_item_set_padding_bottom(item, state.padding);
+			flex_item_set_padding_right(item, state.padding);
 
 			flex_item_add(root, item);
 
-			order = 0;
+			state.order = 0;
 
 			if (op == OP_TEXT) {
 				*p = tmp;
