@@ -596,9 +596,8 @@ op_color(const char *s)
 }
 
 static void
-op_font(cairo_t *cr, PangoLayout *layout, PangoFontDescription **desc, const char *s)
+op_font(PangoLayout *layout, PangoFontDescription **desc, const char *s)
 {
-	assert(cr != NULL);
 	assert(layout != NULL);
 	assert(desc != NULL);
 	assert(s != NULL);
@@ -613,9 +612,8 @@ op_font(cairo_t *cr, PangoLayout *layout, PangoFontDescription **desc, const cha
 }
 
 static void
-op_ellipsize(cairo_t *cr, PangoLayout *layout, const char *s)
+op_ellipsize(PangoLayout *layout, const char *s)
 {
-	assert(cr != NULL);
 	assert(layout != NULL);
 	assert(s != NULL);
 
@@ -1034,7 +1032,7 @@ main(int argc, char **argv)
 		state.ca_name = NULL;
 		state.desc    = NULL;
 
-		op_font(cr, layout, &state.desc, "Sans");
+		op_font(layout, &state.desc, "Sans");
 
 		root = flex_item_new();
 
@@ -1071,11 +1069,11 @@ main(int argc, char **argv)
 				}
 				continue;
 
-			case OP_CA:        state.ca_name = arg;                   continue;
-			case OP_BG:        state.bg = op_color(arg);              continue;
-			case OP_FG:        state.fg = op_color(arg);              continue;
-			case OP_FONT:      op_font(cr, layout, &state.desc, arg); continue;
-			case OP_ELLIPSIZE: op_ellipsize(cr, layout, arg);         continue;
+			case OP_CA:        state.ca_name = arg;               continue;
+			case OP_BG:        state.bg = op_color(arg);          continue;
+			case OP_FG:        state.fg = op_color(arg);          continue;
+			case OP_FONT:      op_font(layout, &state.desc, arg); continue;
+			case OP_ELLIPSIZE: op_ellipsize(layout, arg);         continue;
 
 			case OP_DIR:
 				flex_item_set_direction(root, dir_name(arg));
