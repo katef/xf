@@ -106,6 +106,7 @@ struct eval_state {
 	int order;
 	const char *ca_name;
 	PangoFontDescription *desc;
+	PangoEllipsizeMode e;
 };
 
 struct act {
@@ -125,6 +126,7 @@ struct act {
 		} hr;
 
 		struct act_text {
+			PangoEllipsizeMode e;
 			PangoColor fg;
 			PangoLayout *layout; /* copy, needs destroying */
 		} text;
@@ -611,15 +613,6 @@ op_font(PangoLayout *layout, PangoFontDescription **desc, const char *s)
 	pango_layout_set_font_description(layout, *desc);
 }
 
-static void
-op_ellipsize(PangoLayout *layout, const char *s)
-{
-	assert(layout != NULL);
-	assert(s != NULL);
-
-	pango_layout_set_ellipsize(layout, ellipsize_name(s));
-}
-
 static struct flex_item *
 op_img(struct act *act, const char *file,
 	double margin, double padding)
@@ -721,6 +714,7 @@ op_rule(struct act *act,
 
 static struct flex_item *
 op_text(struct act *act, PangoLayout *layout, const char *s,
+	PangoEllipsizeMode e,
 	PangoColor *fg,
 	double margin, double padding,
 	void (*f)(PangoLayout *, const char *, int))
@@ -738,6 +732,7 @@ op_text(struct act *act, PangoLayout *layout, const char *s,
 
 	act->type = ACT_TEXT;
 
+	act->u.text.e  = e;
 	act->u.text.fg = *fg;
 	act->u.text.layout = pango_layout_copy(layout);
 
@@ -823,6 +818,8 @@ paint(cairo_t *cr, struct flex_item *root, struct act *b, size_t n)
 */
 
 			/* TODO: need to re-layout text if the width changed due to flex_layout */
+
+			pango_layout_set_ellipsize(b[i].u.text.layout, b[i].u.text.e);
 
 			cairo_move_to(cr, f.x + p.l, f.y + p.t);
 			cairo_set_source_rgba(cr, b[i].u.text.fg.red, b[i].u.text.fg.green, b[i].u.text.fg.blue, 1.0);
@@ -1031,6 +1028,7 @@ main(int argc, char **argv)
 		state.order   = 0;
 		state.ca_name = NULL;
 		state.desc    = NULL;
+		state.e       = PANGO_ELLIPSIZE_NONE;
 
 		op_font(layout, &state.desc, "Sans");
 
@@ -1073,7 +1071,7 @@ main(int argc, char **argv)
 			case OP_BG:        state.bg = op_color(arg);          continue;
 			case OP_FG:        state.fg = op_color(arg);          continue;
 			case OP_FONT:      op_font(layout, &state.desc, arg); continue;
-			case OP_ELLIPSIZE: op_ellipsize(layout, arg);         continue;
+			case OP_ELLIPSIZE: state.e = ellipsize_name(arg);     continue;
 
 			case OP_DIR:
 				flex_item_set_direction(root, dir_name(arg));
@@ -1117,12 +1115,14 @@ main(int argc, char **argv)
 
 			/* pango markup: https://developer.gnome.org/pango/stable/PangoMarkupFormat.html */
 			case OP_MARKUP:
-				item = op_text(&b[n], layout, arg, &state.fg, state.margin, state.padding,
+				item = op_text(&b[n], layout, arg,
+					state.e, &state.fg, state.margin, state.padding,
 					pango_layout_set_markup);
 				break;
 
 			case OP_TEXT:
-				item = op_text(&b[n], layout, arg, &state.fg, state.margin, state.padding,
+				item = op_text(&b[n], layout, arg,
+					state.e, &state.fg, state.margin, state.padding,
 					pango_layout_set_text);
 				break;
 
