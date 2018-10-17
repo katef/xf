@@ -122,7 +122,6 @@ struct act {
 		} img;
 
 		struct act_rule {
-			PangoFontDescription *desc;
 			PangoColor fg;
 		} rule;
 
@@ -665,6 +664,7 @@ op_rule(struct act *act,
 	double margin, double padding)
 {
 	struct flex_item *item;
+	int height;
 
 	assert(act != NULL);
 	assert(desc != NULL);
@@ -672,19 +672,46 @@ op_rule(struct act *act,
 
 	act->type = ACT_RULE;
 
-	act->u.rule.desc = pango_font_description_copy(desc);
 	act->u.rule.fg   = *fg;
 
 	item = flex_item_new();
 
-/* TODO:
+	{
+		PangoContext *context;
+		PangoLayout *layout;
+		PangoFontMap *fontmap;
+		PangoFontMetrics *metrics;
+		int ascent, descent;
+
+		/* XXX: error handling */
+		fontmap = pango_cairo_font_map_get_default();
+		context = pango_font_map_create_context(fontmap);
+		layout = pango_layout_new(context);
+
+		/* TODO: centralise with ACT_RULE */
+		pango_context_set_base_gravity(context, PANGO_GRAVITY_SOUTH);
+		pango_layout_set_font_description(layout, desc);
+		pango_layout_set_ellipsize(layout, act->u.text.e);
+
+		/* TODO: centralise with ACT_RULE */
+		/* TODO: default to current language tag */
+		metrics = pango_context_get_metrics(context, desc, NULL);
+
+		ascent  = pango_font_metrics_get_ascent(metrics)  / PANGO_SCALE;
+		descent = pango_font_metrics_get_descent(metrics) / PANGO_SCALE;
+
+		height = ascent + descent;
+
+		/* TODO: destroy stuff */
+		/* this layout is then discarded because the final width and height of the text
+		 * depend on the flex layout. Here we're providing the ideal size. */
+
+		g_object_unref(context);
+		g_object_unref(fontmap);
+	}
+
 	flex_item_set_width(item,  height + (padding * 2));
 	flex_item_set_height(item, height + (padding * 2));
-*/
-
-	/* TODO */
-	flex_item_set_width(item,  20 + (padding * 2));
-	flex_item_set_height(item, 20 + (padding * 2));
 
 	return item;
 }
@@ -696,6 +723,7 @@ op_text(struct act *act, const char *s,
 	void (*f)(PangoLayout *, const char *, int))
 {
 	struct flex_item *item;
+	int width, height;
 
 	assert(act != NULL);
 	assert(s != NULL);
@@ -721,19 +749,35 @@ op_text(struct act *act, const char *s,
 	/* TODO: force min-height here? or leave to flexbox layout */
 	/* TODO: unless we're in ellipsis mode */
 
-/* TODO:
-	pango_layout_get_pixel_size(act->u.text.layout, &width, &height);
+	{
+		PangoContext *context;
+		PangoLayout *layout;
+		PangoFontMap *fontmap;
+
+		/* XXX: error handling */
+		fontmap = pango_cairo_font_map_get_default();
+		context = pango_font_map_create_context(fontmap);
+		layout = pango_layout_new(context);
+
+		/* TODO: centralise with ACT_TEXT */
+		pango_context_set_base_gravity(context, PANGO_GRAVITY_SOUTH);
+		pango_layout_set_font_description(layout, act->u.text.desc);
+		pango_layout_set_ellipsize(layout, act->u.text.e);
+
+		act->u.text.f(layout, act->u.text.s, -1);
+
+		pango_layout_get_pixel_size(layout, &width, &height);
+
+		/* TODO: destroy stuff */
+		/* this layout is then discarded because the final width and height of the text
+		 * depend on the flex layout. Here we're providing the ideal size. */
+
+		g_object_unref(context);
+		g_object_unref(fontmap);
+	}
 
 	flex_item_set_width(item,  width  + (padding * 2));
 	flex_item_set_height(item, height + (padding * 2));
-
-	callback to find size would render and measure, needs to be passed cairo_t *cr for that
-	or render to a dummy pango context?
-*/
-
-	/* TODO */
-	flex_item_set_width(item,  100 + (padding * 2));
-	flex_item_set_height(item, 20  + (padding * 2));
 
 	return item;
 }
@@ -789,45 +833,8 @@ paint(cairo_t *cr, struct flex_item *root, struct act *b, size_t n)
 			break;
 
 		case ACT_RULE: {
-			PangoLayout *layout;
-			int height;
-
-			assert(b[i].u.rule.desc != NULL);
-
-			layout = pango_cairo_create_layout(cr);
-
-			pango_layout_set_font_description(layout, b[i].u.rule.desc);
-
 			/* TODO: line style, dashed etc */
 			/* TODO: automatic horizontal/vertical rule */
-
-			/* XXX: i don't know why this doesn't work; ascent and descent come out at 1 */
-			if (0) {
-				PangoFontMetrics *metrics;
-				PangoContext *context;
-				int ascent, descent;
-
-				context = pango_layout_get_context(layout);
-
-				/* TODO: default to current language tag */
-				metrics = pango_context_get_metrics(context, b[i].u.rule.desc, NULL);
-
-				ascent  = pango_font_metrics_get_ascent(metrics)  / PANGO_SCALE;
-				descent = pango_font_metrics_get_descent(metrics) / PANGO_SCALE;
-				fprintf(stderr, "%d/%d\n", ascent, descent);
-
-				height = ascent + descent;
-			} else {
-				PangoRectangle logical_rect;
-
-				pango_layout_set_text(layout, "M", 1); /* XXX: hacky */
-				pango_layout_get_pixel_extents(layout, NULL, &logical_rect);
-
-				height = logical_rect.height;
-			}
-
-			/* TODO: set height from font, or always use 50% of flex box height? */
-			(void) height;
 
 			cairo_set_source_rgba(cr, b[i].u.rule.fg.red, b[i].u.rule.fg.green, b[i].u.rule.fg.blue, 1.0);
 			cairo_move_to(cr, f.x + p.l, f.y + p.t + ((f.h - p.h) / 2.0));
