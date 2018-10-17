@@ -122,13 +122,16 @@ struct act {
 		} img;
 
 		struct act_rule {
+			PangoFontDescription *desc;
 			PangoColor fg;
-		} hr;
+		} rule;
 
 		struct act_text {
+			PangoFontDescription *desc;
 			PangoEllipsizeMode e;
 			PangoColor fg;
-			PangoLayout *layout; /* copy, needs destroying */
+			void (*f)(PangoLayout *, const char *, int);
+			const char *s;
 		} text;
 	} u;
 };
@@ -598,9 +601,8 @@ op_color(const char *s)
 }
 
 static void
-op_font(PangoLayout *layout, PangoFontDescription **desc, const char *s)
+op_font(PangoFontDescription **desc, const char *s)
 {
-	assert(layout != NULL);
 	assert(desc != NULL);
 	assert(s != NULL);
 
@@ -609,8 +611,6 @@ op_font(PangoLayout *layout, PangoFontDescription **desc, const char *s)
 	}
 
 	*desc = pango_font_description_from_string(s);
-
-	pango_layout_set_font_description(layout, *desc);
 }
 
 static struct flex_item *
@@ -661,90 +661,79 @@ op_img(struct act *act, const char *file,
 
 static struct flex_item *
 op_rule(struct act *act,
-	PangoColor *fg,
-	PangoLayout *layout,
+	PangoFontDescription *desc, PangoColor *fg,
 	double margin, double padding)
 {
 	struct flex_item *item;
-	int height;
 
 	assert(act != NULL);
+	assert(desc != NULL);
 	assert(fg != NULL);
-	assert(layout != NULL);
 
 	act->type = ACT_RULE;
 
-	act->u.hr.fg = *fg;
+	act->u.rule.desc = pango_font_description_copy(desc);
+	act->u.rule.fg   = *fg;
 
 	item = flex_item_new();
 
-	/* XXX: i don't know why this doesn't work; ascent and descent come out at 1 */
-	if (0) {
-		const PangoFontDescription *desc;
-		PangoFontMetrics *metrics;
-		PangoContext *context;
-		int ascent, descent;
-
-		context = pango_layout_get_context(layout);
-
-		desc = pango_layout_get_font_description(layout);
-
-		/* TODO: default to current language tag */
-		metrics = pango_context_get_metrics(context, desc, NULL);
-
-		ascent  = pango_font_metrics_get_ascent(metrics)  / PANGO_SCALE;
-		descent = pango_font_metrics_get_descent(metrics) / PANGO_SCALE;
-		fprintf(stderr, "%d/%d\n", ascent, descent);
-
-		height = ascent + descent;
-	} else {
-		PangoRectangle logical_rect;
-
-		pango_layout_set_text(layout, "M", 1); /* XXX: hacky */
-		pango_layout_get_pixel_extents(layout, NULL, &logical_rect);
-
-		height = logical_rect.height;
-	}
-
+/* TODO:
 	flex_item_set_width(item,  height + (padding * 2));
 	flex_item_set_height(item, height + (padding * 2));
+*/
+
+	/* TODO */
+	flex_item_set_width(item,  20 + (padding * 2));
+	flex_item_set_height(item, 20 + (padding * 2));
 
 	return item;
 }
 
 static struct flex_item *
-op_text(struct act *act, PangoLayout *layout, const char *s,
-	PangoEllipsizeMode e,
-	PangoColor *fg,
+op_text(struct act *act, const char *s,
+	PangoEllipsizeMode e, PangoFontDescription *desc, PangoColor *fg,
 	double margin, double padding,
 	void (*f)(PangoLayout *, const char *, int))
 {
 	struct flex_item *item;
-	int width, height;
 
 	assert(act != NULL);
-	assert(fg != NULL);
-	assert(layout != NULL);
 	assert(s != NULL);
+	assert(desc != NULL);
+	assert(fg != NULL);
 	assert(f != NULL);
-
-	f(layout, s, -1);
 
 	act->type = ACT_TEXT;
 
-	act->u.text.e  = e;
-	act->u.text.fg = *fg;
-	act->u.text.layout = pango_layout_copy(layout);
+	act->u.text.desc = pango_font_description_copy(desc);
+	act->u.text.e    = e;
+	act->u.text.fg   = *fg;
+	act->u.text.f    = f;
+	act->u.text.s    = strdup(s); /* XXX: because *p = '\0' is overwritten later */
+
+	if (act->u.text.s == NULL) {
+		perror("strdup");
+		exit(1);
+	}
 
 	item = flex_item_new();
-
-	pango_layout_get_pixel_size(act->u.text.layout, &width, &height);
 
 	/* TODO: force min-height here? or leave to flexbox layout */
 	/* TODO: unless we're in ellipsis mode */
 
+/* TODO:
+	pango_layout_get_pixel_size(act->u.text.layout, &width, &height);
+
 	flex_item_set_width(item,  width  + (padding * 2));
 	flex_item_set_height(item, height + (padding * 2));
+
+	callback to find size would render and measure, needs to be passed cairo_t *cr for that
+	or render to a dummy pango context?
+*/
+
+	/* TODO */
+	flex_item_set_width(item,  100 + (padding * 2));
+	flex_item_set_height(item, 20  + (padding * 2));
 
 	return item;
 }
@@ -793,21 +782,80 @@ paint(cairo_t *cr, struct flex_item *root, struct act *b, size_t n)
 
 		switch (b[i].type) {
 		case ACT_IMG:
+			assert(b[i].u.img.img != NULL);
+
 			cairo_set_source_surface(cr, b[i].u.img.img, f.x + p.l, f.y + p.t);
 			cairo_paint(cr);
 			break;
 
-		case ACT_RULE:
+		case ACT_RULE: {
+			PangoLayout *layout;
+			int height;
+
+			assert(b[i].u.rule.desc != NULL);
+
+			layout = pango_cairo_create_layout(cr);
+
+			pango_layout_set_font_description(layout, b[i].u.rule.desc);
+
 			/* TODO: line style, dashed etc */
 			/* TODO: automatic horizontal/vertical rule */
 
-			cairo_set_source_rgba(cr, b[i].u.hr.fg.red, b[i].u.hr.fg.green, b[i].u.hr.fg.blue, 1.0);
+			/* XXX: i don't know why this doesn't work; ascent and descent come out at 1 */
+			if (0) {
+				PangoFontMetrics *metrics;
+				PangoContext *context;
+				int ascent, descent;
+
+				context = pango_layout_get_context(layout);
+
+				/* TODO: default to current language tag */
+				metrics = pango_context_get_metrics(context, b[i].u.rule.desc, NULL);
+
+				ascent  = pango_font_metrics_get_ascent(metrics)  / PANGO_SCALE;
+				descent = pango_font_metrics_get_descent(metrics) / PANGO_SCALE;
+				fprintf(stderr, "%d/%d\n", ascent, descent);
+
+				height = ascent + descent;
+			} else {
+				PangoRectangle logical_rect;
+
+				pango_layout_set_text(layout, "M", 1); /* XXX: hacky */
+				pango_layout_get_pixel_extents(layout, NULL, &logical_rect);
+
+				height = logical_rect.height;
+			}
+
+			/* TODO: set height from font, or always use 50% of flex box height? */
+			(void) height;
+
+			cairo_set_source_rgba(cr, b[i].u.rule.fg.red, b[i].u.rule.fg.green, b[i].u.rule.fg.blue, 1.0);
 			cairo_move_to(cr, f.x + p.l, f.y + p.t + ((f.h - p.h) / 2.0));
 			cairo_rel_line_to(cr, f.w - p.w, 0.0);
 			cairo_stroke(cr);
 			break;
+		}
 
-		case ACT_TEXT:
+		case ACT_TEXT: {
+			PangoLayout *layout;
+			PangoContext *context;
+
+			assert(b[i].u.text.desc != NULL);
+			assert(b[i].u.text.f != NULL);
+			assert(b[i].u.text.s != NULL);
+
+			layout = pango_cairo_create_layout(cr);
+
+			/* pango_layout_set_width(layout, f.w * PANGO_SCALE); */
+			pango_layout_set_height(layout, f.h * PANGO_SCALE);
+
+			pango_layout_set_single_paragraph_mode(layout, true);
+
+			context = pango_layout_get_context(layout);
+			pango_context_set_base_gravity(context, PANGO_GRAVITY_SOUTH);
+
+			pango_layout_set_font_description(layout, b[i].u.text.desc);
+
 /*
 			int baseline = pango_layout_get_baseline(b[i].u.text.layout);
 
@@ -817,14 +865,18 @@ paint(cairo_t *cr, struct flex_item *root, struct act *b, size_t n)
 			cairo_stroke(cr);
 */
 
-			/* TODO: need to re-layout text if the width changed due to flex_layout */
+			pango_layout_set_ellipsize(layout, b[i].u.text.e);
 
-			pango_layout_set_ellipsize(b[i].u.text.layout, b[i].u.text.e);
+			b[i].u.text.f(layout, b[i].u.text.s, -1);
 
 			cairo_move_to(cr, f.x + p.l, f.y + p.t);
 			cairo_set_source_rgba(cr, b[i].u.text.fg.red, b[i].u.text.fg.green, b[i].u.text.fg.blue, 1.0);
-			pango_cairo_show_layout(cr, b[i].u.text.layout);
+			pango_cairo_show_layout(cr, layout);
+
+			g_object_unref(layout);
+
 			break;
+		}
 
 		default:
 			assert(!"unreached");
@@ -912,7 +964,6 @@ main(int argc, char **argv)
 {
 	cairo_surface_t *surface;
 	cairo_t *cr;
-	PangoLayout *layout;
 	struct act b[50];
 	size_t n;
 	struct flex_item *root;
@@ -989,16 +1040,6 @@ main(int argc, char **argv)
 
 	cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
 
-	layout = pango_cairo_create_layout(cr);
-
-	/* pango_layout_set_width(layout, width * PANGO_SCALE); */
-	pango_layout_set_height(layout, height * PANGO_SCALE);
-
-	pango_layout_set_single_paragraph_mode(layout, true);
-
-	PangoContext *pctx = pango_layout_get_context(layout);
-	pango_context_set_base_gravity(pctx, PANGO_GRAVITY_SOUTH);
-
 	n = 0;
 
 	char buf[MAX_LINE_LEN];
@@ -1030,7 +1071,7 @@ main(int argc, char **argv)
 		state.desc    = NULL;
 		state.e       = PANGO_ELLIPSIZE_NONE;
 
-		op_font(layout, &state.desc, "Sans");
+		op_font(&state.desc, "Sans");
 
 		root = flex_item_new();
 
@@ -1067,11 +1108,11 @@ main(int argc, char **argv)
 				}
 				continue;
 
-			case OP_CA:        state.ca_name = arg;               continue;
-			case OP_BG:        state.bg = op_color(arg);          continue;
-			case OP_FG:        state.fg = op_color(arg);          continue;
-			case OP_FONT:      op_font(layout, &state.desc, arg); continue;
-			case OP_ELLIPSIZE: state.e = ellipsize_name(arg);     continue;
+			case OP_CA:        state.ca_name = arg;           continue;
+			case OP_BG:        state.bg = op_color(arg);      continue;
+			case OP_FG:        state.fg = op_color(arg);      continue;
+			case OP_FONT:      op_font(&state.desc, arg);     continue;
+			case OP_ELLIPSIZE: state.e = ellipsize_name(arg); continue;
 
 			case OP_DIR:
 				flex_item_set_direction(root, dir_name(arg));
@@ -1107,7 +1148,7 @@ main(int argc, char **argv)
 					fprintf(stderr, "^rule{} is a non-clickable area\n");
 					exit(1);
 				}
-				item = op_rule(&b[n], &state.fg, layout, state.margin, state.padding);
+				item = op_rule(&b[n], state.desc, &state.fg, state.margin, state.padding);
 				if (state.grow == 0.0) {
 					state.grow = 10.0; /* TODO: something sensible for OP_RULE */
 				}
@@ -1115,14 +1156,14 @@ main(int argc, char **argv)
 
 			/* pango markup: https://developer.gnome.org/pango/stable/PangoMarkupFormat.html */
 			case OP_MARKUP:
-				item = op_text(&b[n], layout, arg,
-					state.e, &state.fg, state.margin, state.padding,
+				item = op_text(&b[n], arg,
+					state.e, state.desc, &state.fg, state.margin, state.padding,
 					pango_layout_set_markup);
 				break;
 
 			case OP_TEXT:
-				item = op_text(&b[n], layout, arg,
-					state.e, &state.fg, state.margin, state.padding,
+				item = op_text(&b[n], arg,
+					state.e, state.desc, &state.fg, state.margin, state.padding,
 					pango_layout_set_text);
 				break;
 
@@ -1184,8 +1225,6 @@ main(int argc, char **argv)
 
 		pango_font_description_free(state.desc);
 	}
-
-	g_object_unref(layout);
 
 	switch (format) {
 	case FMT_PDF:
