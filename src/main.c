@@ -19,6 +19,7 @@
 #include <math.h>
 
 #include <unistd.h>
+#include <pthread.h>
 
 #include <xcb/xcb.h>
 #include <xcb/xcb_ewmh.h>
@@ -94,21 +95,6 @@ struct outline {
 	double h;
 };
 
-struct eval_state {
-	double margin;
-	double padding;
-	PangoColor fg;
-	PangoColor bg;
-	flex_align align_self;
-	float grow;
-	float shrink;
-	float basis;
-	int order;
-	const char *ca_name;
-	PangoFontDescription *desc;
-	PangoEllipsizeMode e;
-};
-
 struct act {
 	enum act_type type;
 
@@ -133,6 +119,17 @@ struct act {
 			const char *s;
 		} text;
 	} u;
+};
+
+struct eval_ctx {
+	/* input */
+	const int width;
+	const int height;
+
+	/* output */
+	struct act *b;
+	size_t n;
+	struct flex_item *root;
 };
 
 static enum format
@@ -690,6 +687,7 @@ op_rule(struct act *act,
 
 		/* TODO: centralise with ACT_RULE */
 		pango_context_set_base_gravity(context, PANGO_GRAVITY_SOUTH);
+		pango_layout_set_single_paragraph_mode(layout, true);
 		pango_layout_set_font_description(layout, desc);
 		pango_layout_set_ellipsize(layout, act->u.text.e);
 
@@ -761,6 +759,7 @@ op_text(struct act *act, const char *s,
 
 		/* TODO: centralise with ACT_TEXT */
 		pango_context_set_base_gravity(context, PANGO_GRAVITY_SOUTH);
+		pango_layout_set_single_paragraph_mode(layout, true);
 		pango_layout_set_font_description(layout, act->u.text.desc);
 		pango_layout_set_ellipsize(layout, act->u.text.e);
 
@@ -966,14 +965,220 @@ parse_op(char *p, enum op_type *op, char **arg)
 	return p;
 }
 
+static void *
+eval_main(void *opaque)
+{
+	struct eval_ctx *ectx = opaque;
+	char buf[MAX_LINE_LEN];
+
+	assert(ectx != NULL);
+
+	ectx->n = 0;
+
+	while (fgets(buf, sizeof buf, stdin) != NULL) {
+		enum op_type op;
+		char *arg;
+		char *p;
+
+		struct {
+			double margin;
+			double padding;
+			PangoColor fg;
+			PangoColor bg;
+			flex_align align_self;
+			float grow;
+			float shrink;
+			float basis;
+			int order;
+			const char *ca_name;
+			PangoFontDescription *desc;
+			PangoEllipsizeMode e;
+		} state;
+
+		buf[sizeof buf - 1] = 'x';
+
+		if (buf[sizeof buf - 1] == '\0' && buf[sizeof buf - 2] != '\n') {
+			fprintf(stderr, "buffer overflow\n");
+			exit(1);
+		}
+
+		/* evaluator state persists between ops, reset for each line */
+		state.margin  = 0;
+		state.padding = 0;
+		state.fg      = op_color("white");
+		state.bg      = op_color("black");
+		state.align_self = FLEX_ALIGN_AUTO;
+		state.grow    = 0.0;
+		state.shrink  = 0.0;
+		state.basis   = NAN;
+		state.order   = 0;
+		state.ca_name = NULL;
+		state.desc    = NULL;
+		state.e       = PANGO_ELLIPSIZE_NONE;
+
+		op_font(&state.desc, "Sans");
+
+		ectx->root = flex_item_new();
+
+		flex_item_set_width(ectx->root, ectx->width);
+		flex_item_set_height(ectx->root, ectx->height);
+
+		flex_item_set_align_content(ectx->root, FLEX_ALIGN_CENTER);
+		flex_item_set_align_items(ectx->root, FLEX_ALIGN_END);
+		flex_item_set_direction(ectx->root, FLEX_DIRECTION_ROW);
+
+		p = buf;
+
+		while (arg = p, p = parse_op(p, &op, &arg), p != NULL) {
+			struct flex_item *item;
+			char tmp;
+
+			if (op == OP_TEXT) {
+				tmp = *p;
+				*p = '\0';
+			}
+
+			switch (op) {
+			case OP_OPEN:
+				item = flex_item_new();
+				flex_item_set_width(item,  flex_item_get_width(ectx->root));
+				flex_item_set_height(item, flex_item_get_height(ectx->root));
+				break;
+
+			case OP_CLOSE:
+				ectx->root = flex_item_parent(ectx->root);
+				if (ectx->root == NULL) {
+					fprintf(stderr, "syntax error: unbalanced '}'\n");
+					exit(1);
+				}
+				continue;
+
+			case OP_CA:        state.ca_name = arg;           continue;
+			case OP_BG:        state.bg = op_color(arg);      continue;
+			case OP_FG:        state.fg = op_color(arg);      continue;
+			case OP_FONT:      op_font(&state.desc, arg);     continue;
+			case OP_ELLIPSIZE: state.e = ellipsize_name(arg); continue;
+
+			case OP_DIR:
+				flex_item_set_direction(ectx->root, dir_name(arg));
+				continue;
+
+			case OP_WRAP:
+				flex_item_set_wrap(ectx->root, wrap_name(arg));
+				continue;
+
+			case OP_JUSTIFY_CONTENT:
+				flex_item_set_justify_content(ectx->root, justify_content_name(arg));
+				continue;
+
+			case OP_ALIGN_ITEMS:
+				flex_item_set_align_items(ectx->root, align_name(arg));
+				continue;
+
+			case OP_ALIGN_SELF:
+				state.align_self = align_name(arg);
+				continue;
+
+			case OP_SHRINK: state.shrink = flex_strtof(arg, 0, INFINITY); continue;
+			case OP_ORDER:  state.order  = flex_strtoi(arg, 0, INT_MAX);  continue;
+			case OP_GROW:   state.grow   = flex_strtof(arg, 0, INFINITY); continue;
+			case OP_BASIS:  state.basis  = flex_strtof(arg, 0, INFINITY); continue; /* TODO: auto, etc */
+
+			case OP_IMG:
+				item = op_img(&ectx->b[ectx->n], arg, state.margin, state.padding);
+				break;
+
+			case OP_RULE:
+				if (state.ca_name != NULL) {
+					fprintf(stderr, "^rule{} is a non-clickable area\n");
+					exit(1);
+				}
+				item = op_rule(&ectx->b[ectx->n], state.desc, &state.fg, state.margin, state.padding);
+				if (state.grow == 0.0) {
+					state.grow = 10.0; /* TODO: something sensible for OP_RULE */
+				}
+				break;
+
+			/* pango markup: https://developer.gnome.org/pango/stable/PangoMarkupFormat.html */
+			case OP_MARKUP:
+				item = op_text(&ectx->b[ectx->n], arg,
+					state.e, state.desc, &state.fg, state.margin, state.padding,
+					pango_layout_set_markup);
+				break;
+
+			case OP_TEXT:
+				item = op_text(&ectx->b[ectx->n], arg,
+					state.e, state.desc, &state.fg, state.margin, state.padding,
+					pango_layout_set_text);
+				break;
+
+			default:
+				assert(!"unreached");
+			}
+
+			if (op != OP_OPEN) {
+				ectx->b[ectx->n].bg      = state.bg;
+				ectx->b[ectx->n].item    = item;
+				ectx->b[ectx->n].ca_name = state.ca_name;
+				ectx->n++;
+			}
+
+			if (!isnan(flex_item_get_width(item))) {
+				flex_item_set_grow(item, state.grow);
+				flex_item_set_shrink(item, state.shrink);
+				state.grow    = 0.0;
+				state.shrink  = 0.0;
+				state.ca_name = NULL;
+				/* TODO: reset align-self too */
+			}
+
+			flex_item_set_order(item, state.order);
+			flex_item_set_basis(item, state.basis);
+			flex_item_set_align_self(item, state.align_self);
+
+			flex_item_set_margin_top(item, state.margin);
+			flex_item_set_margin_left(item, state.margin);
+			flex_item_set_margin_bottom(item, state.margin);
+			flex_item_set_margin_right(item, state.margin);
+
+			flex_item_set_padding_top(item, state.padding);
+			flex_item_set_padding_left(item, state.padding);
+			flex_item_set_padding_bottom(item, state.padding);
+			flex_item_set_padding_right(item, state.padding);
+
+			flex_item_add(ectx->root, item);
+
+			state.order = 0;
+
+			if (op == OP_TEXT) {
+				*p = tmp;
+			}
+
+			if (op == OP_OPEN) {
+				ectx->root = item;
+			}
+		}
+
+		if (flex_item_parent(ectx->root) != NULL) {
+			fprintf(stderr, "syntax error: unbalanced '{'\n");
+			exit(1);
+		}
+
+		/* TODO: dispatch */
+
+		/* TODO: destroy flex node tree */
+
+		pango_font_description_free(state.desc);
+	}
+
+	return NULL;
+}
+
 int
 main(int argc, char **argv)
 {
 	cairo_surface_t *surface;
 	cairo_t *cr;
-	struct act b[50];
-	size_t n;
-	struct flex_item *root;
 	int height, width;
 	xcb_window_t win;
 	xcb_connection_t *xcb;
@@ -1043,211 +1248,47 @@ main(int argc, char **argv)
 		cairo_xcb_surface_set_size(surface, width, height);
 	}
 
+	struct act b[50];
+	struct eval_ctx ectx = { width, height, b, 0, NULL };
+
+	{
+		int e;
+
+		pthread_t eval_tid;
+		e = pthread_create(&eval_tid, NULL, eval_main, &ectx);
+		if (e != 0) {
+			errno = e;
+			perror("pthread_create");
+			exit(1);
+		}
+
+		e = pthread_join(eval_tid, NULL);
+		if (e != 0) {
+			errno = e;
+			perror("pthread_join");
+			exit(1);
+		}
+	}
+
 	cr = cairo_create(surface);
 
 	cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
-
-	n = 0;
-
-	char buf[MAX_LINE_LEN];
-
-	while (fgets(buf, sizeof buf, stdin) != NULL) {
-		struct eval_state state;
-		enum op_type op;
-		char *arg;
-		char *p;
-
-		buf[sizeof buf - 1] = 'x';
-
-		if (buf[sizeof buf - 1] == '\0' && buf[sizeof buf - 2] != '\n') {
-			fprintf(stderr, "buffer overflow\n");
-			exit(1);
-		}
-
-		/* evaluator state persists between ops, reset for each line */
-		state.margin  = 0;
-		state.padding = 0;
-		state.fg      = op_color("white");
-		state.bg      = op_color("black");
-		state.align_self = FLEX_ALIGN_AUTO;
-		state.grow    = 0.0;
-		state.shrink  = 0.0;
-		state.basis   = NAN;
-		state.order   = 0;
-		state.ca_name = NULL;
-		state.desc    = NULL;
-		state.e       = PANGO_ELLIPSIZE_NONE;
-
-		op_font(&state.desc, "Sans");
-
-		root = flex_item_new();
-
-		flex_item_set_width(root, width);
-		flex_item_set_height(root, height);
-
-		flex_item_set_align_content(root, FLEX_ALIGN_CENTER);
-		flex_item_set_align_items(root, FLEX_ALIGN_END);
-		flex_item_set_direction(root, FLEX_DIRECTION_ROW);
-
-		p = buf;
-
-		while (arg = p, p = parse_op(p, &op, &arg), p != NULL) {
-			struct flex_item *item;
-			char tmp;
-
-			if (op == OP_TEXT) {
-				tmp = *p;
-				*p = '\0';
-			}
-
-			switch (op) {
-			case OP_OPEN:
-				item = flex_item_new();
-				flex_item_set_width(item,  flex_item_get_width(root));
-				flex_item_set_height(item, flex_item_get_height(root));
-				break;
-
-			case OP_CLOSE:
-				root = flex_item_parent(root);
-				if (root == NULL) {
-					fprintf(stderr, "syntax error: unbalanced '}'\n");
-					exit(1);
-				}
-				continue;
-
-			case OP_CA:        state.ca_name = arg;           continue;
-			case OP_BG:        state.bg = op_color(arg);      continue;
-			case OP_FG:        state.fg = op_color(arg);      continue;
-			case OP_FONT:      op_font(&state.desc, arg);     continue;
-			case OP_ELLIPSIZE: state.e = ellipsize_name(arg); continue;
-
-			case OP_DIR:
-				flex_item_set_direction(root, dir_name(arg));
-				continue;
-
-			case OP_WRAP:
-				flex_item_set_wrap(root, wrap_name(arg));
-				continue;
-
-			case OP_JUSTIFY_CONTENT:
-				flex_item_set_justify_content(root, justify_content_name(arg));
-				continue;
-
-			case OP_ALIGN_ITEMS:
-				flex_item_set_align_items(root, align_name(arg));
-				continue;
-
-			case OP_ALIGN_SELF:
-				state.align_self = align_name(arg);
-				continue;
-
-			case OP_SHRINK: state.shrink = flex_strtof(arg, 0, INFINITY); continue;
-			case OP_ORDER:  state.order  = flex_strtoi(arg, 0, INT_MAX);  continue;
-			case OP_GROW:   state.grow   = flex_strtof(arg, 0, INFINITY); continue;
-			case OP_BASIS:  state.basis  = flex_strtof(arg, 0, INFINITY); continue; /* TODO: auto, etc */
-
-			case OP_IMG:
-				item = op_img(&b[n], arg, state.margin, state.padding);
-				break;
-
-			case OP_RULE:
-				if (state.ca_name != NULL) {
-					fprintf(stderr, "^rule{} is a non-clickable area\n");
-					exit(1);
-				}
-				item = op_rule(&b[n], state.desc, &state.fg, state.margin, state.padding);
-				if (state.grow == 0.0) {
-					state.grow = 10.0; /* TODO: something sensible for OP_RULE */
-				}
-				break;
-
-			/* pango markup: https://developer.gnome.org/pango/stable/PangoMarkupFormat.html */
-			case OP_MARKUP:
-				item = op_text(&b[n], arg,
-					state.e, state.desc, &state.fg, state.margin, state.padding,
-					pango_layout_set_markup);
-				break;
-
-			case OP_TEXT:
-				item = op_text(&b[n], arg,
-					state.e, state.desc, &state.fg, state.margin, state.padding,
-					pango_layout_set_text);
-				break;
-
-			default:
-				assert(!"unreached");
-			}
-
-			if (op != OP_OPEN) {
-				b[n].bg      = state.bg;
-				b[n].item    = item;
-				b[n].ca_name = state.ca_name;
-				n++;
-			}
-
-			if (!isnan(flex_item_get_width(item))) {
-				flex_item_set_grow(item, state.grow);
-				flex_item_set_shrink(item, state.shrink);
-				state.grow    = 0.0;
-				state.shrink  = 0.0;
-				state.ca_name = NULL;
-				/* TODO: reset align-self too */
-			}
-
-			flex_item_set_order(item, state.order);
-			flex_item_set_basis(item, state.basis);
-			flex_item_set_align_self(item, state.align_self);
-
-			flex_item_set_margin_top(item, state.margin);
-			flex_item_set_margin_left(item, state.margin);
-			flex_item_set_margin_bottom(item, state.margin);
-			flex_item_set_margin_right(item, state.margin);
-
-			flex_item_set_padding_top(item, state.padding);
-			flex_item_set_padding_left(item, state.padding);
-			flex_item_set_padding_bottom(item, state.padding);
-			flex_item_set_padding_right(item, state.padding);
-
-			flex_item_add(root, item);
-
-			state.order = 0;
-
-			if (op == OP_TEXT) {
-				*p = tmp;
-			}
-
-			if (op == OP_OPEN) {
-				root = item;
-			}
-		}
-
-		if (flex_item_parent(root) != NULL) {
-			fprintf(stderr, "syntax error: unbalanced '{'\n");
-			exit(1);
-		}
-
-		/* TODO: dispatch */
-
-		/* TODO: destroy flex node tree */
-
-		pango_font_description_free(state.desc);
-	}
 
 	switch (format) {
 	case FMT_PDF:
 	case FMT_PNG:
 	case FMT_SVG:
-		paint(cr, root, b, n);
+		paint(cr, ectx.root, ectx.b, ectx.n);
 		if (format == FMT_PNG) {
 			cairo_surface_write_to_png(surface, of);
 		}
-		flex_item_free(root);
+		flex_item_free(ectx.root);
 		cairo_destroy(cr);
 		cairo_surface_destroy(surface);
 		exit(0);
 
 	case FMT_XCB:
-		paint(cr, root, b, n);
+		paint(cr, ectx.root, ectx.b, ectx.n);
 		break;
 	}
 
@@ -1271,7 +1312,7 @@ main(int argc, char **argv)
 
 			fprintf(stderr, "expose\n");
 
-			paint(cr, root, b, n);
+			paint(cr, ectx.root, ectx.b, ectx.n);
 			xcb_flush(xcb);
 			break;
 		}
@@ -1280,20 +1321,20 @@ main(int argc, char **argv)
 			xcb_button_press_event_t *press = (xcb_button_press_event_t *) e;
 			unsigned i;
 
-			for (i = 0; i < n; i++) {
+			for (i = 0; i < ectx.n; i++) {
 				struct geom f;
 
-				if (b[i].ca_name == NULL) {
+				if (ectx.b[i].ca_name == NULL) {
 					continue;
 				}
 
-				f = flex_item_get_frame(b[i].item);
+				f = flex_item_get_frame(ectx.b[i].item);
 
 				if (!inside(&f, press->event_x, press->event_y)) {
 					continue;
 				}
 
-				fprintf(stderr, "%s %d", b[i].ca_name, press->detail);
+				fprintf(stderr, "%s %d", ectx.b[i].ca_name, press->detail);
 				print_modifiers(press->state);
 				fprintf(stderr, "\n");
 			}
@@ -1309,7 +1350,7 @@ main(int argc, char **argv)
 		free(e);
 	}
 
-	flex_item_free(root);
+	flex_item_free(ectx.root);
 	cairo_surface_destroy(surface);
 	xcb_disconnect(xcb);
 
