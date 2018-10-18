@@ -139,6 +139,20 @@ struct ui_ctx {
 	const size_t *n;
 };
 
+static char *
+xstrdup(const char *s)
+{
+	char *p;
+
+	p = strdup(s);
+	if (p == NULL) {
+		perror("strdup");
+		exit(1);
+	}
+
+	return p;
+}
+
 static enum format
 ext(const char *file)
 {
@@ -742,12 +756,7 @@ op_text(struct act *act, const char *s,
 	act->u.text.e    = e;
 	act->u.text.fg   = *fg;
 	act->u.text.f    = f;
-	act->u.text.s    = strdup(s); /* XXX: because *p = '\0' is overwritten later */
-
-	if (act->u.text.s == NULL) {
-		perror("strdup");
-		exit(1);
-	}
+	act->u.text.s    = xstrdup(s); /* XXX: because *p = '\0' is overwritten later */
 
 	item = flex_item_new();
 
