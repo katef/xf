@@ -132,6 +132,16 @@ struct eval_ctx {
 	struct flex_item *root;
 };
 
+struct ui_ctx {
+	xcb_connection_t *xcb;
+	cairo_t *cr;
+
+	/* input */
+	const struct act *b;
+	const size_t *n;
+	/* const */ struct flex_item *root;
+};
+
 static enum format
 ext(const char *file)
 {
@@ -782,17 +792,16 @@ op_text(struct act *act, const char *s,
 }
 
 static void
-paint(cairo_t *cr, struct flex_item *root, struct act *b, size_t n)
+paint(cairo_t *cr, /* const */ struct flex_item *root, const struct act *b, size_t n)
 {
 	unsigned i;
 	double w, h;
-
-	flex_layout(root);
 
 	w = flex_item_get_width(root);
 	h = flex_item_get_height(root);
 
 	/* TODO: bg */
+	/* TODO: no need to pass root here; all items should fully occupy the container */
 	cairo_set_source_rgba(cr, 0.2, 0.3, 0.4, 1.0);
 	cairo_rectangle(cr, 0, 0, w, h);
 	cairo_fill(cr);
@@ -1174,11 +1183,82 @@ eval_main(void *opaque)
 	return NULL;
 }
 
+static void *
+ui_main(void *opaque)
+{
+	struct ui_ctx *uctx = opaque;
+	xcb_generic_event_t *e;
+
+	assert(uctx != NULL);
+	assert(uctx->b != NULL);
+	assert(uctx->n != NULL);
+	assert(uctx->root != NULL);
+
+	while (e = xcb_wait_for_event(uctx->xcb), e != NULL) {
+		switch (e->response_type & ~0x80) {
+		case XCB_KEY_PRESS: {
+			xcb_key_press_event_t *press = (xcb_key_press_event_t *) e;
+			fprintf(stderr, "key %d\n", press->detail);
+			if (press->detail == 24) exit(1);
+			break;
+		}
+
+		case XCB_EXPOSE: {
+			xcb_expose_event_t *expose = (xcb_expose_event_t *) e;
+
+			if (expose->count != 0) {
+				break;
+			}
+
+			fprintf(stderr, "expose\n");
+
+			flex_layout(uctx->root);
+
+			paint(uctx->cr, uctx->root, uctx->b, *uctx->n);
+			xcb_flush(uctx->xcb);
+			break;
+		}
+
+		case XCB_BUTTON_PRESS: {
+			xcb_button_press_event_t *press = (xcb_button_press_event_t *) e;
+			unsigned i;
+
+			for (i = 0; i < *uctx->n; i++) {
+				struct geom f;
+
+				if (uctx->b[i].ca_name == NULL) {
+					continue;
+				}
+
+				f = flex_item_get_frame(uctx->b[i].item);
+
+				if (!inside(&f, press->event_x, press->event_y)) {
+					continue;
+				}
+
+				fprintf(stderr, "%s %d", uctx->b[i].ca_name, press->detail);
+				print_modifiers(press->state);
+				fprintf(stderr, "\n");
+			}
+
+			break;
+		}
+
+		default:
+			fprintf(stderr, "unhandled event %d\n", e->response_type & ~0x80);
+			break;
+		}
+
+		free(e);
+	}
+
+	return NULL;
+}
+
 int
 main(int argc, char **argv)
 {
 	cairo_surface_t *surface;
-	cairo_t *cr;
 	int height, width;
 	xcb_window_t win;
 	xcb_connection_t *xcb;
@@ -1270,14 +1350,20 @@ main(int argc, char **argv)
 		}
 	}
 
-	cr = cairo_create(surface);
-
-	cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
+	assert(ectx.root != NULL);
 
 	switch (format) {
 	case FMT_PDF:
 	case FMT_PNG:
-	case FMT_SVG:
+	case FMT_SVG: {
+		cairo_t *cr;
+
+		cr = cairo_create(surface);
+
+		cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
+
+		flex_layout(ectx.root);
+
 		paint(cr, ectx.root, ectx.b, ectx.n);
 		if (format == FMT_PNG) {
 			cairo_surface_write_to_png(surface, of);
@@ -1286,68 +1372,37 @@ main(int argc, char **argv)
 		cairo_destroy(cr);
 		cairo_surface_destroy(surface);
 		exit(0);
+	}
 
 	case FMT_XCB:
-		paint(cr, ectx.root, ectx.b, ectx.n);
 		break;
 	}
 
-	xcb_generic_event_t *e;
+	cairo_t *cr;
 
-	while (e = xcb_wait_for_event(xcb), e != NULL) {
-		switch (e->response_type & ~0x80) {
-		case XCB_KEY_PRESS: {
-			xcb_key_press_event_t *press = (xcb_key_press_event_t *) e;
-			fprintf(stderr, "key %d\n", press->detail);
-			if (press->detail == 24) exit(1);
-			break;
+	cr = cairo_create(surface);
+
+	cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
+
+	struct ui_ctx uctx = { xcb, cr, ectx.b, &ectx.n, ectx.root };
+
+	{
+		int e;
+
+		pthread_t ui_tid;
+		e = pthread_create(&ui_tid, NULL, ui_main, &uctx);
+		if (e != 0) {
+			errno = e;
+			perror("pthread_create");
+			exit(1);
 		}
 
-		case XCB_EXPOSE: {
-			xcb_expose_event_t *expose = (xcb_expose_event_t *) e;
-
-			if (expose->count != 0) {
-				break;
-			}
-
-			fprintf(stderr, "expose\n");
-
-			paint(cr, ectx.root, ectx.b, ectx.n);
-			xcb_flush(xcb);
-			break;
+		e = pthread_join(ui_tid, NULL);
+		if (e != 0) {
+			errno = e;
+			perror("pthread_join");
+			exit(1);
 		}
-
-		case XCB_BUTTON_PRESS: {
-			xcb_button_press_event_t *press = (xcb_button_press_event_t *) e;
-			unsigned i;
-
-			for (i = 0; i < ectx.n; i++) {
-				struct geom f;
-
-				if (ectx.b[i].ca_name == NULL) {
-					continue;
-				}
-
-				f = flex_item_get_frame(ectx.b[i].item);
-
-				if (!inside(&f, press->event_x, press->event_y)) {
-					continue;
-				}
-
-				fprintf(stderr, "%s %d", ectx.b[i].ca_name, press->detail);
-				print_modifiers(press->state);
-				fprintf(stderr, "\n");
-			}
-
-			break;
-		}
-
-		default:
-			fprintf(stderr, "unhandled event %d\n", e->response_type & ~0x80);
-			break;
-		}
-
-		free(e);
 	}
 
 	flex_item_free(ectx.root);
