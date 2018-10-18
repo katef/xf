@@ -122,11 +122,6 @@ struct act {
 };
 
 struct eval_ctx {
-	/* input */
-	const int width;
-	const int height;
-
-	/* output */
 	struct act *b;
 	size_t n;
 	struct flex_item *root;
@@ -139,7 +134,6 @@ struct ui_ctx {
 	/* input */
 	const struct act *b;
 	const size_t *n;
-	/* const */ struct flex_item *root;
 };
 
 static enum format
@@ -1017,11 +1011,6 @@ eval_main(void *opaque)
 
 		op_font(&state.desc, "Sans");
 
-		ectx->root = flex_item_new();
-
-		flex_item_set_width(ectx->root, ectx->width);
-		flex_item_set_height(ectx->root, ectx->height);
-
 		flex_item_set_align_content(ectx->root, FLEX_ALIGN_CENTER);
 		flex_item_set_align_items(ectx->root, FLEX_ALIGN_END);
 		flex_item_set_direction(ectx->root, FLEX_DIRECTION_ROW);
@@ -1163,6 +1152,8 @@ eval_main(void *opaque)
 			exit(1);
 		}
 
+		flex_layout(ectx->root);
+
 		/* TODO: dispatch */
 
 		/* TODO: destroy flex node tree */
@@ -1182,7 +1173,6 @@ ui_main(void *opaque)
 	assert(uctx != NULL);
 	assert(uctx->b != NULL);
 	assert(uctx->n != NULL);
-	assert(uctx->root != NULL);
 
 	while (e = xcb_wait_for_event(uctx->xcb), e != NULL) {
 		switch (e->response_type & ~0x80) {
@@ -1201,8 +1191,6 @@ ui_main(void *opaque)
 			}
 
 			fprintf(stderr, "expose\n");
-
-			flex_layout(uctx->root);
 
 			paint(uctx->cr, uctx->b, *uctx->n);
 			xcb_flush(uctx->xcb);
@@ -1249,6 +1237,7 @@ int
 main(int argc, char **argv)
 {
 	cairo_surface_t *surface;
+	struct flex_item *root;
 	int height, width;
 	xcb_window_t win;
 	xcb_connection_t *xcb;
@@ -1318,8 +1307,14 @@ main(int argc, char **argv)
 		cairo_xcb_surface_set_size(surface, width, height);
 	}
 
+	root = flex_item_new();
+
+	/* TODO: would be re-set on xcb resize event */
+	flex_item_set_width(root, width);
+	flex_item_set_height(root, height);
+
 	struct act b[50];
-	struct eval_ctx ectx = { width, height, b, 0, NULL };
+	struct eval_ctx ectx = { b, 0, root };
 
 	{
 		int e;
@@ -1340,8 +1335,6 @@ main(int argc, char **argv)
 		}
 	}
 
-	assert(ectx.root != NULL);
-
 	switch (format) {
 	case FMT_PDF:
 	case FMT_PNG:
@@ -1352,13 +1345,11 @@ main(int argc, char **argv)
 
 		cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
 
-		flex_layout(ectx.root);
-
 		paint(cr, ectx.b, ectx.n);
 		if (format == FMT_PNG) {
 			cairo_surface_write_to_png(surface, of);
 		}
-		flex_item_free(ectx.root);
+		flex_item_free(root);
 		cairo_destroy(cr);
 		cairo_surface_destroy(surface);
 		exit(0);
@@ -1374,7 +1365,7 @@ main(int argc, char **argv)
 
 	cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
 
-	struct ui_ctx uctx = { xcb, cr, ectx.b, &ectx.n, ectx.root };
+	struct ui_ctx uctx = { xcb, cr, ectx.b, &ectx.n };
 
 	{
 		int e;
@@ -1395,7 +1386,7 @@ main(int argc, char **argv)
 		}
 	}
 
-	flex_item_free(ectx.root);
+	flex_item_free(root);
 	cairo_surface_destroy(surface);
 	xcb_disconnect(xcb);
 
