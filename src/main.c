@@ -98,7 +98,6 @@ struct outline {
 struct act {
 	enum act_type type;
 
-	struct flex_item *item;
 	struct geom f;
 	struct outline m;
 	struct outline p;
@@ -126,6 +125,7 @@ struct act {
 
 struct eval_ctx {
 	struct act *b;
+	struct flex_item **items;
 	size_t n;
 	struct flex_item *root;
 };
@@ -1106,8 +1106,8 @@ eval_main(void *opaque)
 
 			if (op != OP_OPEN) {
 				ectx->b[ectx->n].bg      = state.bg;
-				ectx->b[ectx->n].item    = item;
 				ectx->b[ectx->n].ca_name = state.ca_name;
+				ectx->items[ectx->n]     = item;
 				ectx->n++;
 			}
 
@@ -1306,7 +1306,8 @@ main(int argc, char **argv)
 	flex_item_set_height(root, height);
 
 	struct act b[50];
-	struct eval_ctx ectx = { b, 0, root };
+	struct flex_item *items[50];
+	struct eval_ctx ectx = { b, items, 0, root };
 
 	{
 		int e;
@@ -1340,11 +1341,11 @@ still don't know how to wake up ui thread to re-draw. generate fake event?
 	flex_layout(root);
 
 	for (unsigned i = 0; i < ectx.n; i++) {
-		ectx.b[i].f = flex_item_get_frame(ectx.b[i].item);
-		ectx.b[i].m = flex_item_get_margin(ectx.b[i].item);
-		ectx.b[i].p = flex_item_get_padding(ectx.b[i].item);
+		ectx.b[i].f = flex_item_get_frame(items[i]);
+		ectx.b[i].m = flex_item_get_margin(items[i]);
+		ectx.b[i].p = flex_item_get_padding(items[i]);
 
-		ectx.b[i].item = NULL;
+		items[i] = NULL;
 	}
 
 	flex_item_free(root);
