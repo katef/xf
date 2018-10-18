@@ -792,19 +792,9 @@ op_text(struct act *act, const char *s,
 }
 
 static void
-paint(cairo_t *cr, /* const */ struct flex_item *root, const struct act *b, size_t n)
+paint(cairo_t *cr, const struct act *b, size_t n)
 {
 	unsigned i;
-	double w, h;
-
-	w = flex_item_get_width(root);
-	h = flex_item_get_height(root);
-
-	/* TODO: bg */
-	/* TODO: no need to pass root here; all items should fully occupy the container */
-	cairo_set_source_rgba(cr, 0.2, 0.3, 0.4, 1.0);
-	cairo_rectangle(cr, 0, 0, w, h);
-	cairo_fill(cr);
 
 	for (i = 0; i < n; i++) {
 		struct geom f;
@@ -1214,7 +1204,7 @@ ui_main(void *opaque)
 
 			flex_layout(uctx->root);
 
-			paint(uctx->cr, uctx->root, uctx->b, *uctx->n);
+			paint(uctx->cr, uctx->b, *uctx->n);
 			xcb_flush(uctx->xcb);
 			break;
 		}
@@ -1364,7 +1354,7 @@ main(int argc, char **argv)
 
 		flex_layout(ectx.root);
 
-		paint(cr, ectx.root, ectx.b, ectx.n);
+		paint(cr, ectx.b, ectx.n);
 		if (format == FMT_PNG) {
 			cairo_surface_write_to_png(surface, of);
 		}
