@@ -99,6 +99,9 @@ struct act {
 	enum act_type type;
 
 	struct flex_item *item;
+	struct geom f;
+	struct outline m;
+	struct outline p;
 	PangoColor bg;
 	const char *ca_name;
 
@@ -791,28 +794,25 @@ paint(cairo_t *cr, const struct act *b, size_t n)
 	unsigned i;
 
 	for (i = 0; i < n; i++) {
-		struct geom f;
-		struct outline m, p;
-
-		f = flex_item_get_frame(b[i].item);
-		m = flex_item_get_margin(b[i].item);
-		p = flex_item_get_padding(b[i].item);
+		const struct geom    *f = &b[i].f;
+		const struct outline *m = &b[i].m;
+		const struct outline *p = &b[i].p;
 
 		(void) m;
 
 /*
 		cairo_set_source_rgba(cr, 0.4, 0.4, 1.0, 0.5);
-		cairo_rectangle(cr, f.x - m.l, f.y - m.t, f.w + m.w, f.h + m.h);
+		cairo_rectangle(cr, f->x - m->l, f->y - m->t, f->w + m->w, f->h + m->h);
 		cairo_fill(cr);
 */
 
 		cairo_set_source_rgba(cr, b[i].bg.red, b[i].bg.green, b[i].bg.blue, 1.0);
-		cairo_rectangle(cr, f.x, f.y, f.w, f.h);
+		cairo_rectangle(cr, f->x, f->y, f->w, f->h);
 		cairo_fill(cr);
 
 /*
 		cairo_set_source_rgba(cr, 1.0, 0.4, 0.4, 0.5);
-		cairo_rectangle(cr, f.x + p.l, f.y + p.t, f.w - p.w, f.h - p.h);
+		cairo_rectangle(cr, f->x + p->l, f->y + p->t, f->w - p->w, f->h - p->h);
 		cairo_fill(cr);
 */
 
@@ -820,7 +820,7 @@ paint(cairo_t *cr, const struct act *b, size_t n)
 		case ACT_IMG:
 			assert(b[i].u.img.img != NULL);
 
-			cairo_set_source_surface(cr, b[i].u.img.img, f.x + p.l, f.y + p.t);
+			cairo_set_source_surface(cr, b[i].u.img.img, f->x + p->l, f->y + p->t);
 			cairo_paint(cr);
 			break;
 
@@ -829,8 +829,8 @@ paint(cairo_t *cr, const struct act *b, size_t n)
 			/* TODO: automatic horizontal/vertical rule */
 
 			cairo_set_source_rgba(cr, b[i].u.rule.fg.red, b[i].u.rule.fg.green, b[i].u.rule.fg.blue, 1.0);
-			cairo_move_to(cr, f.x + p.l, f.y + p.t + ((f.h - p.h) / 2.0));
-			cairo_rel_line_to(cr, f.w - p.w, 0.0);
+			cairo_move_to(cr, f->x + p->l, f->y + p->t + ((f->h - p->h) / 2.0));
+			cairo_rel_line_to(cr, f->w - p->w, 0.0);
 			cairo_stroke(cr);
 			break;
 		}
@@ -845,8 +845,8 @@ paint(cairo_t *cr, const struct act *b, size_t n)
 
 			layout = pango_cairo_create_layout(cr);
 
-			/* pango_layout_set_width(layout, f.w * PANGO_SCALE); */
-			pango_layout_set_height(layout, f.h * PANGO_SCALE);
+			/* pango_layout_set_width(layout, f->w * PANGO_SCALE); */
+			pango_layout_set_height(layout, f->h * PANGO_SCALE);
 
 			pango_layout_set_single_paragraph_mode(layout, true);
 
@@ -859,8 +859,8 @@ paint(cairo_t *cr, const struct act *b, size_t n)
 			int baseline = pango_layout_get_baseline(b[i].u.text.layout);
 
 			cairo_set_source_rgba(cr, b[i].u.text.fg.red * 0.2, b[i].u.text.fg.green * 0.2, b[i].u.text.fg.blue * 0.2, 0.8);
-			cairo_move_to(cr, f.x + p.l, f.y + p.t + (double) baseline / PANGO_SCALE);
-			cairo_rel_line_to(cr, f.w - p.w, 0.0);
+			cairo_move_to(cr, f->x + p->l, f->y + p->t + (double) baseline / PANGO_SCALE);
+			cairo_rel_line_to(cr, f->w - p->w, 0.0);
 			cairo_stroke(cr);
 */
 
@@ -868,7 +868,7 @@ paint(cairo_t *cr, const struct act *b, size_t n)
 
 			b[i].u.text.f(layout, b[i].u.text.s, -1);
 
-			cairo_move_to(cr, f.x + p.l, f.y + p.t);
+			cairo_move_to(cr, f->x + p->l, f->y + p->t);
 			cairo_set_source_rgba(cr, b[i].u.text.fg.red, b[i].u.text.fg.green, b[i].u.text.fg.blue, 1.0);
 			pango_cairo_show_layout(cr, layout);
 
@@ -1152,11 +1152,7 @@ eval_main(void *opaque)
 			exit(1);
 		}
 
-		flex_layout(ectx->root);
-
 		/* TODO: dispatch */
-
-		/* TODO: destroy flex node tree */
 
 		pango_font_description_free(state.desc);
 	}
@@ -1202,15 +1198,11 @@ ui_main(void *opaque)
 			unsigned i;
 
 			for (i = 0; i < *uctx->n; i++) {
-				struct geom f;
-
 				if (uctx->b[i].ca_name == NULL) {
 					continue;
 				}
 
-				f = flex_item_get_frame(uctx->b[i].item);
-
-				if (!inside(&f, press->event_x, press->event_y)) {
+				if (!inside(&uctx->b[i].f, press->event_x, press->event_y)) {
 					continue;
 				}
 
@@ -1335,6 +1327,28 @@ main(int argc, char **argv)
 		}
 	}
 
+/* XXX: the laying out needs to be re-done on an xcb resize event
+we only need to layout when painting, and expose is also one of those events
+so maybe layout is owned by the painting */
+/*
+- main thread: layout, ownership of root
+- eval thread: populate items
+- ui thread: events, paint
+still don't know how to wake up ui thread to re-draw. generate fake event?
+*/
+
+	flex_layout(root);
+
+	for (unsigned i = 0; i < ectx.n; i++) {
+		ectx.b[i].f = flex_item_get_frame(ectx.b[i].item);
+		ectx.b[i].m = flex_item_get_margin(ectx.b[i].item);
+		ectx.b[i].p = flex_item_get_padding(ectx.b[i].item);
+
+		ectx.b[i].item = NULL;
+	}
+
+	flex_item_free(root);
+
 	switch (format) {
 	case FMT_PDF:
 	case FMT_PNG:
@@ -1349,7 +1363,6 @@ main(int argc, char **argv)
 		if (format == FMT_PNG) {
 			cairo_surface_write_to_png(surface, of);
 		}
-		flex_item_free(root);
 		cairo_destroy(cr);
 		cairo_surface_destroy(surface);
 		exit(0);
@@ -1386,7 +1399,6 @@ main(int argc, char **argv)
 		}
 	}
 
-	flex_item_free(root);
 	cairo_surface_destroy(surface);
 	xcb_disconnect(xcb);
 
