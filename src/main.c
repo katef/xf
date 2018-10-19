@@ -157,6 +157,22 @@ struct ui_ctx {
 	int fd;
 };
 
+struct eval_state {
+	struct flex_item *root;
+	double margin;
+	double padding;
+	PangoColor fg;
+	PangoColor bg;
+	flex_align align_self;
+	float grow;
+	float shrink;
+	float basis;
+	int order;
+	const char *ca_name;
+	PangoFontDescription *desc;
+	PangoEllipsizeMode e;
+};
+
 pthread_mutex_t mutex_ops  = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_acts = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1071,182 +1087,186 @@ parse_main(void *opaque)
 	return NULL;
 }
 
+static struct flex_item *
+eval_op(struct eval_state *state, const struct op *op, struct act *b)
+{
+	struct flex_item *item;
+
+	assert(state != NULL);
+	assert(op != NULL);
+	assert(op->arg != NULL);
+	assert(b != NULL);
+
+	switch (op->type) {
+	case OP_OPEN:
+		item = flex_item_new();
+		flex_item_set_width(item,  flex_item_get_width(state->root));
+		flex_item_set_height(item, flex_item_get_height(state->root));
+		break;
+
+	case OP_CLOSE:
+		state->root = flex_item_parent(state->root);
+		if (state->root == NULL) {
+			fprintf(stderr, "syntax error: unbalanced '}'\n");
+			exit(1);
+		}
+		return NULL;
+
+	case OP_CA:        state->ca_name = op->arg;           return NULL;
+	case OP_BG:        state->bg = op_color(op->arg);      return NULL;
+	case OP_FG:        state->fg = op_color(op->arg);      return NULL;
+	case OP_FONT:      op_font(&state->desc, op->arg);     return NULL;
+	case OP_ELLIPSIZE: state->e = ellipsize_name(op->arg); return NULL;
+
+	case OP_DIR:
+		flex_item_set_direction(state->root, dir_name(op->arg));
+		return NULL;
+
+	case OP_WRAP:
+		flex_item_set_wrap(state->root, wrap_name(op->arg));
+		return NULL;
+
+	case OP_JUSTIFY_CONTENT:
+		flex_item_set_justify_content(state->root, justify_content_name(op->arg));
+		return NULL;
+
+	case OP_ALIGN_ITEMS:
+		flex_item_set_align_items(state->root, align_name(op->arg));
+		return NULL;
+
+	case OP_ALIGN_SELF:
+		state->align_self = align_name(op->arg);
+		return NULL;
+
+	case OP_SHRINK: state->shrink = flex_strtof(op->arg, 0, INFINITY); return NULL;
+	case OP_ORDER:  state->order  = flex_strtoi(op->arg, 0, INT_MAX);  return NULL;
+	case OP_GROW:   state->grow   = flex_strtof(op->arg, 0, INFINITY); return NULL;
+	case OP_BASIS:  state->basis  = flex_strtof(op->arg, 0, INFINITY); return NULL; /* TODO: auto, etc */
+
+	case OP_IMG:
+		item = op_img(b, op->arg, state->margin, state->padding);
+		break;
+
+	case OP_RULE:
+		if (state->ca_name != NULL) {
+			fprintf(stderr, "^rule{} is a non-clickable area\n");
+			exit(1);
+		}
+		item = op_rule(b, state->desc, &state->fg, state->margin, state->padding);
+		if (state->grow == 0.0) {
+			state->grow = 10.0; /* TODO: something sensible for OP_RULE */
+		}
+		break;
+
+	/* pango markup: https://developer.gnome.org/pango/stable/PangoMarkupFormat.html */
+	case OP_MARKUP:
+		item = op_text(b, op->arg,
+			state->e, state->desc, &state->fg, state->margin, state->padding,
+			pango_layout_set_markup);
+		break;
+
+	case OP_TEXT:
+		item = op_text(b, op->arg,
+			state->e, state->desc, &state->fg, state->margin, state->padding,
+			pango_layout_set_text);
+		break;
+
+	default:
+		assert(!"unreached");
+	}
+
+	return item;
+}
+
 static void
 eval_line(struct eval_ctx *ectx, int width, int height, const struct op *ops, unsigned n)
 {
-	struct flex_item *root;
-	double margin;
-	double padding;
-	PangoColor fg;
-	PangoColor bg;
-	flex_align align_self;
-	float grow;
-	float shrink;
-	float basis;
-	int order;
-	const char *ca_name;
-	PangoFontDescription *desc;
-	PangoEllipsizeMode e;
+	struct eval_state state;
 
 	assert(ectx != NULL);
 	assert(ops != NULL);
 
 	/* evaluator state persists between ops, reset for each line */
-	margin  = 0;
-	padding = 0;
-	fg      = op_color("white");
-	bg      = op_color("black");
-	align_self = FLEX_ALIGN_AUTO;
-	grow    = 0.0;
-	shrink  = 0.0;
-	basis   = NAN;
-	order   = 0;
-	ca_name = NULL;
-	desc    = NULL;
-	e       = PANGO_ELLIPSIZE_NONE;
+	state.root    = flex_item_new();
+	state.margin  = 0;
+	state.padding = 0;
+	state.fg      = op_color("white");
+	state.bg      = op_color("black");
+	state.align_self = FLEX_ALIGN_AUTO;
+	state.grow    = 0.0;
+	state.shrink  = 0.0;
+	state.basis   = NAN;
+	state.order   = 0;
+	state.ca_name = NULL;
+	state.desc    = NULL;
+	state.e       = PANGO_ELLIPSIZE_NONE;
 
-	op_font(&desc, "Sans");
+	op_font(&state.desc, "Sans");
 
-	root = flex_item_new();
+	flex_item_set_width(state.root, width);
+	flex_item_set_height(state.root, height);
 
-	flex_item_set_width(root, width);
-	flex_item_set_height(root, height);
-
-	flex_item_set_align_content(root, FLEX_ALIGN_CENTER);
-	flex_item_set_align_items(root, FLEX_ALIGN_END);
-	flex_item_set_direction(root, FLEX_DIRECTION_ROW);
+	flex_item_set_align_content(state.root, FLEX_ALIGN_CENTER);
+	flex_item_set_align_items(state.root, FLEX_ALIGN_END);
+	flex_item_set_direction(state.root, FLEX_DIRECTION_ROW);
 
 	ectx->n = 0;
 
 	for (unsigned i = 0; i < n; i++) {
-		const char *arg = ops[i].arg;
 		struct flex_item *item;
 
-		switch (ops[i].type) {
-		case OP_OPEN:
-			item = flex_item_new();
-			flex_item_set_width(item,  flex_item_get_width(root));
-			flex_item_set_height(item, flex_item_get_height(root));
-			break;
-
-		case OP_CLOSE:
-			root = flex_item_parent(root);
-			if (root == NULL) {
-				fprintf(stderr, "syntax error: unbalanced '}'\n");
-				exit(1);
-			}
+		item = eval_op(&state, &ops[i], &ectx->b[ectx->n]);
+		if (item == NULL) {
 			continue;
-
-		case OP_CA:        ca_name = arg;           continue;
-		case OP_BG:        bg = op_color(arg);      continue;
-		case OP_FG:        fg = op_color(arg);      continue;
-		case OP_FONT:      op_font(&desc, arg);     continue;
-		case OP_ELLIPSIZE: e = ellipsize_name(arg); continue;
-
-		case OP_DIR:
-			flex_item_set_direction(root, dir_name(arg));
-			continue;
-
-		case OP_WRAP:
-			flex_item_set_wrap(root, wrap_name(arg));
-			continue;
-
-		case OP_JUSTIFY_CONTENT:
-			flex_item_set_justify_content(root, justify_content_name(arg));
-			continue;
-
-		case OP_ALIGN_ITEMS:
-			flex_item_set_align_items(root, align_name(arg));
-			continue;
-
-		case OP_ALIGN_SELF:
-			align_self = align_name(arg);
-			continue;
-
-		case OP_SHRINK: shrink = flex_strtof(arg, 0, INFINITY); continue;
-		case OP_ORDER:  order  = flex_strtoi(arg, 0, INT_MAX);  continue;
-		case OP_GROW:   grow   = flex_strtof(arg, 0, INFINITY); continue;
-		case OP_BASIS:  basis  = flex_strtof(arg, 0, INFINITY); continue; /* TODO: auto, etc */
-
-		case OP_IMG:
-			item = op_img(&ectx->b[ectx->n], arg, margin, padding);
-			break;
-
-		case OP_RULE:
-			if (ca_name != NULL) {
-				fprintf(stderr, "^rule{} is a non-clickable area\n");
-				exit(1);
-			}
-			item = op_rule(&ectx->b[ectx->n], desc, &fg, margin, padding);
-			if (grow == 0.0) {
-				grow = 10.0; /* TODO: something sensible for OP_RULE */
-			}
-			break;
-
-		/* pango markup: https://developer.gnome.org/pango/stable/PangoMarkupFormat.html */
-		case OP_MARKUP:
-			item = op_text(&ectx->b[ectx->n], arg,
-				e, desc, &fg, margin, padding,
-				pango_layout_set_markup);
-			break;
-
-		case OP_TEXT:
-			item = op_text(&ectx->b[ectx->n], arg,
-				e, desc, &fg, margin, padding,
-				pango_layout_set_text);
-			break;
-
-		default:
-			assert(!"unreached");
 		}
 
 		if (ops[i].type != OP_OPEN) {
-			ectx->b[ectx->n].bg      = bg;
-			ectx->b[ectx->n].ca_name = ca_name;
+			ectx->b[ectx->n].bg      = state.bg;
+			ectx->b[ectx->n].ca_name = state.ca_name;
 			ectx->items[ectx->n]     = item;
 			ectx->n++;
 		}
 
 		if (!isnan(flex_item_get_width(item))) {
-			flex_item_set_grow(item, grow);
-			flex_item_set_shrink(item, shrink);
-			grow    = 0.0;
-			shrink  = 0.0;
-			ca_name = NULL;
+			flex_item_set_grow(item, state.grow);
+			flex_item_set_shrink(item, state.shrink);
+			state.grow    = 0.0;
+			state.shrink  = 0.0;
+			state.ca_name = NULL;
 			/* TODO: reset align-self too */
 		}
 
-		flex_item_set_order(item, order);
-		flex_item_set_basis(item, basis);
-		flex_item_set_align_self(item, align_self);
+		flex_item_set_order(item, state.order);
+		flex_item_set_basis(item, state.basis);
+		flex_item_set_align_self(item, state.align_self);
 
-		flex_item_set_margin_top(item, margin);
-		flex_item_set_margin_left(item, margin);
-		flex_item_set_margin_bottom(item, margin);
-		flex_item_set_margin_right(item, margin);
+		flex_item_set_margin_top(item, state.margin);
+		flex_item_set_margin_left(item, state.margin);
+		flex_item_set_margin_bottom(item, state.margin);
+		flex_item_set_margin_right(item, state.margin);
 
-		flex_item_set_padding_top(item, padding);
-		flex_item_set_padding_left(item, padding);
-		flex_item_set_padding_bottom(item, padding);
-		flex_item_set_padding_right(item, padding);
+		flex_item_set_padding_top(item, state.padding);
+		flex_item_set_padding_left(item, state.padding);
+		flex_item_set_padding_bottom(item, state.padding);
+		flex_item_set_padding_right(item, state.padding);
 
-		flex_item_add(root, item);
+		flex_item_add(state.root, item);
 
-		order = 0;
+		state.order = 0;
 
 		if (ops[i].type == OP_OPEN) {
-			root = item;
+			state.root = item;
 		}
 	}
 
-	if (flex_item_parent(root) != NULL) {
+	if (flex_item_parent(state.root) != NULL) {
 		fprintf(stderr, "syntax error: unbalanced '{'\n");
 		exit(1);
 	}
 
-	pango_font_description_free(desc);
+	pango_font_description_free(state.desc);
 
-	flex_layout(root);
+	flex_layout(state.root);
 
 	for (unsigned i = 0; i < ectx->n; i++) {
 		ectx->b[i].f = flex_item_get_frame(ectx->items[i]);
@@ -1254,7 +1274,7 @@ eval_line(struct eval_ctx *ectx, int width, int height, const struct op *ops, un
 		ectx->b[i].p = flex_item_get_padding(ectx->items[i]);
 	}
 
-	flex_item_free(root);
+	flex_item_free(state.root);
 }
 
 static void *
