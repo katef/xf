@@ -7,6 +7,7 @@
 #define _XOPEN_SOURCE 500
 
 #include <sys/types.h>
+#include <sys/uio.h>
 
 #include <assert.h>
 #include <stdbool.h>
@@ -34,6 +35,14 @@
 #include <flex.h>
 
 #define MAX_LINE_LEN 8192
+
+enum {
+	IPC_BUTTON = 1 << 0,
+	IPC_RESIZE = 1 << 1,
+	IPC_OPS    = 1 << 2,
+	IPC_PAINT  = 1 << 3,
+	IPC_EXIT   = 1 << 4
+};
 
 enum format {
 	FMT_PDF,
@@ -131,6 +140,8 @@ struct act {
 struct parse_ctx {
 	struct op *ops;
 	size_t n;
+
+	int fd;
 };
 
 struct eval_ctx {
@@ -143,10 +154,39 @@ struct ui_ctx {
 	xcb_connection_t *xcb;
 	cairo_t *cr;
 
-	/* input */
-	const struct act *b;
-	const size_t *n;
+	int fd;
 };
+
+pthread_mutex_t mutex_ops  = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex_acts = PTHREAD_MUTEX_INITIALIZER;
+
+static void
+xlock(pthread_mutex_t *mutex)
+{
+	int e;
+
+	assert(mutex != NULL);
+
+	e = pthread_mutex_lock(mutex);
+	if (e != 0) {
+		perror("pthread_mutex_lock");
+		exit(1);
+	}
+}
+
+static void
+xunlock(pthread_mutex_t *mutex)
+{
+	int e;
+
+	assert(mutex != NULL);
+
+	e = pthread_mutex_unlock(mutex);
+	if (e != 0) {
+		perror("pthread_mutex_unlock");
+		exit(1);
+	}
+}
 
 static char *
 xstrdup(const char *s)
@@ -984,8 +1024,6 @@ parse_main(void *opaque)
 
 	assert(pctx != NULL);
 
-	pctx->n = 0;
-
 	while (fgets(buf, sizeof buf, stdin) != NULL) {
 		enum op_type op;
 		char *arg;
@@ -999,6 +1037,10 @@ parse_main(void *opaque)
 		}
 
 		p = buf;
+
+		xlock(&mutex_ops);
+
+		pctx->n = 0;
 
 		while (arg = p, p = parse_op(p, &op, &arg), p != NULL) {
 			char tmp;
@@ -1017,7 +1059,13 @@ parse_main(void *opaque)
 			}
 		}
 
-		/* TODO: dispatch line */
+		xunlock(&mutex_ops);
+
+		if (pctx->fd == -1) {
+			continue;
+		}
+
+		write(pctx->fd, & (char) { IPC_OPS }, 1); /* XXX */
 	}
 
 	return NULL;
@@ -1067,6 +1115,8 @@ eval_line(struct eval_ctx *ectx, int width, int height, const struct op *ops, un
 	flex_item_set_align_content(root, FLEX_ALIGN_CENTER);
 	flex_item_set_align_items(root, FLEX_ALIGN_END);
 	flex_item_set_direction(root, FLEX_DIRECTION_ROW);
+
+	ectx->n = 0;
 
 	for (unsigned i = 0; i < n; i++) {
 		const char *arg = ops[i].arg;
@@ -1202,8 +1252,6 @@ eval_line(struct eval_ctx *ectx, int width, int height, const struct op *ops, un
 		ectx->b[i].f = flex_item_get_frame(ectx->items[i]);
 		ectx->b[i].m = flex_item_get_margin(ectx->items[i]);
 		ectx->b[i].p = flex_item_get_padding(ectx->items[i]);
-
-		ectx->items[i] = NULL;
 	}
 
 	flex_item_free(root);
@@ -1216,8 +1264,6 @@ ui_main(void *opaque)
 	xcb_generic_event_t *e;
 
 	assert(uctx != NULL);
-	assert(uctx->b != NULL);
-	assert(uctx->n != NULL);
 
 	while (e = xcb_wait_for_event(uctx->xcb), e != NULL) {
 		switch (e->response_type & ~0x80) {
@@ -1237,28 +1283,20 @@ ui_main(void *opaque)
 
 			fprintf(stderr, "expose\n");
 
-			paint(uctx->cr, uctx->b, *uctx->n);
-			xcb_flush(uctx->xcb);
+			write(uctx->fd, & (char) { IPC_PAINT }, 1); /* XXX */
+
 			break;
 		}
 
 		case XCB_BUTTON_PRESS: {
 			xcb_button_press_event_t *press = (xcb_button_press_event_t *) e;
-			unsigned i;
 
-			for (i = 0; i < *uctx->n; i++) {
-				if (uctx->b[i].ca_name == NULL) {
-					continue;
-				}
-
-				if (!inside(&uctx->b[i].f, press->event_x, press->event_y)) {
-					continue;
-				}
-
-				fprintf(stderr, "%s %d", uctx->b[i].ca_name, press->detail);
-				print_modifiers(press->state);
-				fprintf(stderr, "\n");
-			}
+			writev(uctx->fd, (struct iovec []) {
+				{ & (char) { IPC_BUTTON }, 1 },
+				{ &press->event_x, sizeof press->event_x },
+				{ &press->event_y, sizeof press->event_y },
+				{ &press->detail,  sizeof press->detail  },
+				{ &press->state,   sizeof press->state   } }, 5); /* XXX */
 
 			break;
 		}
@@ -1287,6 +1325,7 @@ main(int argc, char **argv)
 	int screen_number;
 	const char *of;
 	enum format format;
+	int e;
 
 	width   = 0;
 	height  = 0;
@@ -1347,74 +1386,27 @@ main(int argc, char **argv)
 		cairo_xcb_surface_set_size(surface, width, height);
 	}
 
-	struct op ops[50];
-	struct parse_ctx pctx = { ops, 0 };
+	cairo_t *cr;
 
-	{
-		int e;
+	cr = cairo_create(surface);
 
-		pthread_t parse_tid;
-		e = pthread_create(&parse_tid, NULL, parse_main, &pctx);
-		if (e != 0) {
-			errno = e;
-			perror("pthread_create");
-			exit(1);
-		}
+	cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
 
-		e = pthread_join(parse_tid, NULL);
-		if (e != 0) {
-			errno = e;
-			perror("pthread_join");
-			exit(1);
-		}
-	}
+	struct op ops[75];
 
 	struct act b[50];
 	struct flex_item *items[50];
 	struct eval_ctx ectx = { b, items, 0 };
 
-	/* TODO: width, height would be re-set on xcb resize event...
-	 * which means eval_line() would be re-called for the same ops[] */
-	eval_line(&ectx, width, height, pctx.ops, pctx.n);
-
-/* XXX: the laying out needs to be re-done on an xcb resize event
-we only need to layout when painting, and expose is also one of those events
-so maybe layout is owned by the painting */
-/*
-- main thread: layout, ownership of root
-- eval thread: populate items
-- ui thread: events, paint
-still don't know how to wake up ui thread to re-draw. generate fake event?
-
-do all this in a self-pipe or self-socket. read "events".
-both eval_tid and ui_tid can write "events" to the pipe. we get serialisation for free
-width and height come from expose events that way
-
-maybe not an actual socket, but somehow we need a pipe abstraction
-could use a cond or ct_event_t or something
-
-consider if too many fgets lines happen; we'd want to drop most, and only act on the last one
-so a buffer pipe depth of 1 would do
-
-still need a lock even if both threads write to a pipe,
-because they're not writing an array of actions; they're writing notification about the actions changing
-
-unless i have the eval thread read into a separate datastructure than the ui thread uses to display
-isn't that what i just did? almost
-
-could make this even more primitive; write one action at a time
-don't want to serialise everything (espcially opaque things like .desc)
-*/
-
 	switch (format) {
 	case FMT_PDF:
 	case FMT_PNG:
 	case FMT_SVG: {
-		cairo_t *cr;
+		struct parse_ctx pctx = { ops, 0, -1 };
 
-		cr = cairo_create(surface);
+		parse_main(&pctx);
 
-		cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
+		eval_line(&ectx, width, height, pctx.ops, pctx.n);
 
 		paint(cr, ectx.b, ectx.n);
 		if (format == FMT_PNG) {
@@ -1429,31 +1421,119 @@ don't want to serialise everything (espcially opaque things like .desc)
 		break;
 	}
 
-	cairo_t *cr;
+	int fds[2];
+	if (-1 == pipe(fds)) {
+		perror("pipe");
+		exit(1);
+	}
 
-	cr = cairo_create(surface);
+	struct parse_ctx pctx = { ops, 0, fds[1] };
 
-	cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
+	pthread_t parse_tid;
+	e = pthread_create(&parse_tid, NULL, parse_main, &pctx);
+	if (e != 0) {
+		errno = e;
+		perror("pthread_create");
+		exit(1);
+	}
 
-	struct ui_ctx uctx = { xcb, cr, ectx.b, &ectx.n };
+	struct ui_ctx uctx = { xcb, cr, fds[1] };
 
-	{
-		int e;
+	pthread_t ui_tid;
+	e = pthread_create(&ui_tid, NULL, ui_main, &uctx);
+	if (e != 0) {
+		errno = e;
+		perror("pthread_create");
+		exit(1);
+	}
 
-		pthread_t ui_tid;
-		e = pthread_create(&ui_tid, NULL, ui_main, &uctx);
-		if (e != 0) {
-			errno = e;
-			perror("pthread_create");
-			exit(1);
+	/* XXX: needn't be a pipe; a signal style bitmask of one-item-each would do */
+	char x;
+	while (read(fds[0], &x, 1) == 1) {
+		switch (x) {
+		case IPC_BUTTON: {
+			uint16_t event_x, event_y;
+			xcb_button_t detail;
+			uint16_t state;
+			unsigned i;
+
+			readv(fds[0], (struct iovec[]) {
+				{ &event_x, sizeof event_x },
+				{ &event_y, sizeof event_y },
+				{ &detail,  sizeof detail  },
+				{ &state,   sizeof state   } }, 4); /* XXX */
+
+			xlock(&mutex_acts);
+
+			for (i = 0; i < ectx.n; i++) {
+				if (ectx.b[i].ca_name == NULL) {
+					continue;
+				}
+
+				if (!inside(&ectx.b[i].f, event_x, event_y)) {
+					continue;
+				}
+
+				fprintf(stderr, "%s %d", ectx.b[i].ca_name, detail);
+				print_modifiers(state);
+				fprintf(stderr, "\n");
+			}
+
+			xunlock(&mutex_acts);
+
+			break;
 		}
 
-		e = pthread_join(ui_tid, NULL);
-		if (e != 0) {
-			errno = e;
-			perror("pthread_join");
-			exit(1);
+		case IPC_RESIZE:
+			/* TODO: set new width and height */
+
+			/* fallthrough */
+
+		case IPC_OPS:
+			/* TODO: width, height would be re-set on xcb resize event...
+			 * which means eval_line() would be re-called for the same ops[] */
+			xlock(&mutex_ops);
+			xlock(&mutex_acts);
+
+			eval_line(&ectx, width, height, pctx.ops, pctx.n);
+
+			xunlock(&mutex_acts);
+			xunlock(&mutex_ops);
+
+			/* fallthrough */
+
+		case IPC_PAINT:
+			/* TODO: expose, redraw etc can use the same b[] act array; nothing changed.
+			 * i.e. no need to take the ops lock */
+
+			xlock(&mutex_acts);
+
+			paint(cr, ectx.b, ectx.n);
+
+			xunlock(&mutex_acts);
+
+			xcb_flush(uctx.xcb);
+			break;
+
+		case IPC_EXIT:
+			close(fds[0]);
+			close(fds[1]);
+			break;
 		}
+	}
+
+	e = pthread_join(ui_tid, NULL);
+	if (e != 0) {
+		errno = e;
+		perror("pthread_join");
+		exit(1);
+	}
+
+	e = pthread_join(parse_tid, NULL);
+	if (e != 0) {
+		errno = e;
+		perror("pthread_join");
+		exit(1);
 	}
 
 	cairo_surface_destroy(surface);
