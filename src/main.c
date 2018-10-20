@@ -617,7 +617,7 @@ visual_of_screen(xcb_connection_t *xcb, xcb_screen_t *screen, xcb_visualid_t vis
 static xcb_window_t
 win_create(xcb_connection_t *xcb, xcb_ewmh_connection_t *ewmh,
 	xcb_screen_t *screen, int width, int height,
-	const char *title)
+	bool dock, const char *title)
 {
 	xcb_window_t win;
 
@@ -652,8 +652,10 @@ win_create(xcb_connection_t *xcb, xcb_ewmh_connection_t *ewmh,
 	xcb_ewmh_set_wm_visible_name(ewmh, win, strlen(title), title);
 	xcb_ewmh_set_wm_icon_name   (ewmh, win, strlen(title), title);
 
-	xcb_ewmh_set_wm_window_type (ewmh, win, 1, &ewmh->_NET_WM_WINDOW_TYPE_DOCK);
-	xcb_ewmh_set_wm_state       (ewmh, win, 1, &ewmh->_NET_WM_STATE_ABOVE);
+	if (dock) {
+		xcb_ewmh_set_wm_window_type (ewmh, win, 1, &ewmh->_NET_WM_WINDOW_TYPE_DOCK);
+		xcb_ewmh_set_wm_state       (ewmh, win, 1, &ewmh->_NET_WM_STATE_ABOVE);
+	}
 
 	xcb_ewmh_set_wm_pid(ewmh, win, getpid());
 	xcb_ewmh_set_wm_desktop(ewmh, win, 0xffffffff);
@@ -1372,6 +1374,7 @@ main(int argc, char **argv)
 	int screen_number;
 	const char *of;
 	enum format format;
+	bool dock;
 	int e;
 
 	width   = 0;
@@ -1379,14 +1382,19 @@ main(int argc, char **argv)
 
 	of = NULL;
 	format = FMT_XCB;
+	dock = false;
 
 	{
 		int c;
 
-		while (c = getopt(argc, argv, "w:h:o:"), c != -1) {
+		while (c = getopt(argc, argv, "w:h:do:"), c != -1) {
 			switch (c) {
 			case 'h': height = atoi(optarg); break; /* XXX: range */
 			case 'w': width  = atoi(optarg); break;
+
+			case 'd':
+				dock = true;
+				break;
 
 			case 'o':
 				of = optarg;
@@ -1495,7 +1503,7 @@ main(int argc, char **argv)
 	}
 
 	/* TODO: title */
-	win = win_create(xcb, &ewmh, screen, width, height, "hello");
+	win = win_create(xcb, &ewmh, screen, width, height, dock, "hello");
 
 	/* XXX: needn't be a pipe; a signal style bitmask of one-item-each would do */
 	char x;
