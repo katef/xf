@@ -24,6 +24,7 @@
 
 #include <xcb/xcb.h>
 #include <xcb/xcb_ewmh.h>
+#include <xcb/xcb_icccm.h>
 
 #include <cairo.h>
 #include <cairo-pdf.h>
@@ -632,7 +633,8 @@ win_create(xcb_connection_t *xcb, xcb_ewmh_connection_t *ewmh,
 	valwin[0]
 		= XCB_EVENT_MASK_KEY_PRESS
 		| XCB_EVENT_MASK_EXPOSURE
-		| XCB_EVENT_MASK_BUTTON_PRESS;
+		| XCB_EVENT_MASK_BUTTON_PRESS
+		| XCB_EVENT_MASK_STRUCTURE_NOTIFY;
 
 	win = xcb_generate_id(xcb);
 
@@ -657,6 +659,14 @@ win_create(xcb_connection_t *xcb, xcb_ewmh_connection_t *ewmh,
 	xcb_ewmh_set_wm_desktop(ewmh, win, 0xffffffff);
 
 	/* TODO: _NET_WM_STRUT_PARTIAL and friends */
+
+	xcb_size_hints_t hints;
+
+	// TODO: only limit height when docked
+	xcb_icccm_size_hints_set_min_size(&hints, 0, height);
+	// xcb_icccm_size_hints_set_max_size(&hints, 9999999, height);
+
+	xcb_icccm_set_wm_size_hints(xcb, win, XCB_ATOM_WM_NORMAL_HINTS, &hints);
 
 	xcb_map_window(xcb, win);
 
@@ -1284,8 +1294,14 @@ ui_main(void *opaque)
 
 	assert(uctx != NULL);
 
+	xcb_flush(uctx->xcb);
+
 	while (e = xcb_wait_for_event(uctx->xcb), e != NULL) {
 		switch (e->response_type & ~0x80) {
+		case XCB_MAP_NOTIFY:
+		case XCB_REPARENT_NOTIFY:
+			break;
+
 		case XCB_KEY_PRESS: {
 			xcb_key_press_event_t *press = (xcb_key_press_event_t *) e;
 			fprintf(stderr, "key %d\n", press->detail);
@@ -1303,6 +1319,19 @@ ui_main(void *opaque)
 			fprintf(stderr, "expose\n");
 
 			write(uctx->fd, & (char) { IPC_PAINT }, 1); /* XXX */
+
+			break;
+		}
+
+		case XCB_CONFIGURE_NOTIFY: {
+			xcb_configure_notify_event_t *configure = (xcb_configure_notify_event_t *) e;
+
+			fprintf(stderr, "configure to %d,%d\n", configure->width, configure->height);
+
+			writev(uctx->fd, (struct iovec []) {
+				{ & (char) { IPC_RESIZE }, 1 },
+				{ &configure->width,  sizeof configure->width  },
+				{ &configure->height, sizeof configure->height } }, 3); /* XXX */
 
 			break;
 		}
@@ -1334,7 +1363,7 @@ ui_main(void *opaque)
 int
 main(int argc, char **argv)
 {
-	int height, width;
+	int width, height;
 	xcb_window_t win;
 	xcb_connection_t *xcb;
 	xcb_ewmh_connection_t ewmh;
@@ -1388,6 +1417,10 @@ main(int argc, char **argv)
 		cairo_surface_t *surface;
 		cairo_t *cr;
 
+		if (format != FMT_XCB && width == 0) {
+			width = 800; /* XXX */
+		}
+
 		switch (format) {
 		case FMT_PDF: surface = cairo_pdf_surface_create(of, width, height); break;
 		case FMT_PNG: surface = cairo_image_surface_create(
@@ -1408,13 +1441,16 @@ main(int argc, char **argv)
 
 			cr = cairo_create(surface);
 
+			cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
+
 			paint(cr, ectx.b, ectx.n);
+
+			cairo_destroy(cr);
 			if (format == FMT_PNG) {
 				cairo_surface_write_to_png(surface, of);
 			}
 
-			cairo_destroy(cr);
-//			cairo_surface_destroy(surface);
+			cairo_surface_destroy(surface);
 
 			exit(0);
 		}
@@ -1498,8 +1534,16 @@ main(int argc, char **argv)
 			break;
 		}
 
-		case IPC_RESIZE:
-			/* TODO: set new width and height */
+		case IPC_RESIZE: {
+			uint16_t w, h;
+
+			readv(fds[0], (struct iovec[]) {
+				{ &w, sizeof w },
+				{ &h, sizeof h } }, 2); /* XXX */
+
+			width  = w;
+			height = h;
+		}
 
 			/* fallthrough */
 
@@ -1517,19 +1561,33 @@ main(int argc, char **argv)
 			/* fallthrough */
 
 		case IPC_PAINT:
-			/* TODO: expose, redraw etc can use the same b[] act array; nothing changed.
-			 * i.e. no need to take the ops lock */
+			{
+				xcb_gcontext_t foreground = xcb_generate_id(xcb);
+				uint32_t mask = 0;
+				uint32_t values[2];
+				mask = XCB_GC_FOREGROUND | XCB_GC_GRAPHICS_EXPOSURES;
+				values[0] = screen->white_pixel;
+				values[1] = 0;
+				xcb_create_gc(xcb, foreground, win, mask, values);
+				xcb_poly_line(xcb, XCB_COORD_MODE_ORIGIN, win, foreground,
+					2, (xcb_point_t []) { { 0, 0 }, { width, height } });
+			}
 
 			{
 				cairo_surface_t *surface;
 				cairo_t *cr;
 
 				surface = cairo_xcb_surface_create(xcb, win, visual, width, height);
-//				cairo_xcb_surface_set_size(surface, width, height);
 
 				cr = cairo_create(surface);
 
 				cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
+
+/*
+				cairo_set_source_rgba(cr, 0.4, 0.4, 1.0, 0.1);
+				cairo_rectangle(cr, 0, 0, width, height);
+				cairo_fill(cr);
+*/
 
 				xlock(&mutex_acts);
 
@@ -1537,8 +1595,9 @@ main(int argc, char **argv)
 
 				xunlock(&mutex_acts);
 
-//				cairo_surface_destroy(surface);
 				cairo_destroy(cr);
+
+				cairo_surface_destroy(surface);
 			}
 
 			xcb_flush(uctx.xcb);
