@@ -152,7 +152,6 @@ struct eval_ctx {
 
 struct ui_ctx {
 	xcb_connection_t *xcb;
-	cairo_t *cr;
 
 	int fd;
 };
@@ -1335,7 +1334,6 @@ ui_main(void *opaque)
 int
 main(int argc, char **argv)
 {
-	cairo_surface_t *surface;
 	int height, width;
 	xcb_window_t win;
 	xcb_connection_t *xcb;
@@ -1380,65 +1378,58 @@ main(int argc, char **argv)
 		height = 20; /* XXX: default from discovered height */
 	}
 
-	switch (format) {
-	case FMT_PDF: surface = cairo_pdf_surface_create(of, width, height); break;
-	case FMT_PNG: surface = cairo_image_surface_create(
-	                        	CAIRO_FORMAT_ARGB32, width, height);     break;
-	case FMT_SVG: surface = cairo_svg_surface_create(of, width, height); break;
-
-	case FMT_XCB:
-		xcb = xcb_connect(NULL, &screen_number);
-
-		xcb_intern_atom_cookie_t *cookie = xcb_ewmh_init_atoms(xcb, &ewmh);
-		xcb_ewmh_init_atoms_replies(&ewmh, cookie, NULL);
-
-		screen = screen_of_display(xcb, screen_number);
-		visual = visual_of_screen(xcb, screen, screen->root_visual);
-
-		if (width == 0) {
-			width  = screen->width_in_pixels;
-		}
-
-		/* TODO: title */
-		win = win_create(xcb, &ewmh, screen, width, height, "hello");
-
-		surface = cairo_xcb_surface_create(xcb, win, visual, width, height);
-		cairo_xcb_surface_set_size(surface, width, height);
-	}
-
-	cairo_t *cr;
-
-	cr = cairo_create(surface);
-
-	cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
-
 	struct op ops[75];
 
 	struct act b[50];
 	struct flex_item *items[50];
 	struct eval_ctx ectx = { b, items, 0 };
 
-	switch (format) {
-	case FMT_PDF:
-	case FMT_PNG:
-	case FMT_SVG: {
-		struct parse_ctx pctx = { ops, 0, -1 };
+	{
+		cairo_surface_t *surface;
+		cairo_t *cr;
 
-		parse_main(&pctx);
+		switch (format) {
+		case FMT_PDF: surface = cairo_pdf_surface_create(of, width, height); break;
+		case FMT_PNG: surface = cairo_image_surface_create(
+									CAIRO_FORMAT_ARGB32, width, height);     break;
+		case FMT_SVG: surface = cairo_svg_surface_create(of, width, height); break;
 
-		eval_line(&ectx, width, height, pctx.ops, pctx.n);
-
-		paint(cr, ectx.b, ectx.n);
-		if (format == FMT_PNG) {
-			cairo_surface_write_to_png(surface, of);
+		case FMT_XCB:
+			surface = NULL;
+			break;
 		}
-		cairo_destroy(cr);
-		cairo_surface_destroy(surface);
-		exit(0);
+
+		if (surface != NULL) {
+			struct parse_ctx pctx = { ops, 0, -1 };
+
+			parse_main(&pctx);
+
+			eval_line(&ectx, width, height, pctx.ops, pctx.n);
+
+			cr = cairo_create(surface);
+
+			paint(cr, ectx.b, ectx.n);
+			if (format == FMT_PNG) {
+				cairo_surface_write_to_png(surface, of);
+			}
+
+			cairo_destroy(cr);
+//			cairo_surface_destroy(surface);
+
+			exit(0);
+		}
 	}
 
-	case FMT_XCB:
-		break;
+	xcb = xcb_connect(NULL, &screen_number);
+
+	xcb_intern_atom_cookie_t *cookie = xcb_ewmh_init_atoms(xcb, &ewmh);
+	xcb_ewmh_init_atoms_replies(&ewmh, cookie, NULL);
+
+	screen = screen_of_display(xcb, screen_number);
+	visual = visual_of_screen(xcb, screen, screen->root_visual);
+
+	if (width == 0) {
+		width  = screen->width_in_pixels;
 	}
 
 	int fds[2];
@@ -1457,7 +1448,7 @@ main(int argc, char **argv)
 		exit(1);
 	}
 
-	struct ui_ctx uctx = { xcb, cr, fds[1] };
+	struct ui_ctx uctx = { xcb, fds[1] };
 
 	pthread_t ui_tid;
 	e = pthread_create(&ui_tid, NULL, ui_main, &uctx);
@@ -1466,6 +1457,9 @@ main(int argc, char **argv)
 		perror("pthread_create");
 		exit(1);
 	}
+
+	/* TODO: title */
+	win = win_create(xcb, &ewmh, screen, width, height, "hello");
 
 	/* XXX: needn't be a pipe; a signal style bitmask of one-item-each would do */
 	char x;
@@ -1526,11 +1520,26 @@ main(int argc, char **argv)
 			/* TODO: expose, redraw etc can use the same b[] act array; nothing changed.
 			 * i.e. no need to take the ops lock */
 
-			xlock(&mutex_acts);
+			{
+				cairo_surface_t *surface;
+				cairo_t *cr;
 
-			paint(cr, ectx.b, ectx.n);
+				surface = cairo_xcb_surface_create(xcb, win, visual, width, height);
+//				cairo_xcb_surface_set_size(surface, width, height);
 
-			xunlock(&mutex_acts);
+				cr = cairo_create(surface);
+
+				cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
+
+				xlock(&mutex_acts);
+
+				paint(cr, ectx.b, ectx.n);
+
+				xunlock(&mutex_acts);
+
+//				cairo_surface_destroy(surface);
+				cairo_destroy(cr);
+			}
 
 			xcb_flush(uctx.xcb);
 			break;
@@ -1556,7 +1565,6 @@ main(int argc, char **argv)
 		exit(1);
 	}
 
-	cairo_surface_destroy(surface);
 	xcb_disconnect(xcb);
 
 	return 0;
