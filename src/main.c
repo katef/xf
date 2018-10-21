@@ -677,25 +677,65 @@ win_create(xcb_connection_t *xcb, xcb_ewmh_connection_t *ewmh,
 static struct rgba
 op_color(const char *s)
 {
-	struct rgba c;
-	PangoColor color;
+	unsigned long n;
+	char *e;
 
 	assert(s != NULL);
 
-	/* TODO: disallow #rrrgggbbb or #rrrrggggbbbb */
-	/* TODO: allow #rrggbbaa for alpha */
+	if (s[0] != '#') {
+		PangoColor color;
 
-	/* CSS spec color names */
-	if (!pango_color_parse(&color, s)) {
-		perror("pango_color_parse");
+		/* CSS spec color names */
+		if (!pango_color_parse(&color, s)) {
+			perror("pango_color_parse");
+			exit(1);
+		}
+
+		return (struct rgba) {
+			color.red   / (double) UINT16_MAX,
+			color.green / (double) UINT16_MAX,
+			color.blue  / (double) UINT16_MAX,
+			1.0
+		};
 	}
 
-	c.r = color.red   / (double) UINT16_MAX;
-	c.g = color.green / (double) UINT16_MAX;
-	c.b = color.blue  / (double) UINT16_MAX;
-	c.a = 1.0;
+	s++;
 
-	return c;
+	n = strtoul(s, &e, 16);
+	if (n == ULONG_MAX || *e != '\0') {
+		goto error;
+	}
+
+	switch (e - s) {
+	case 3:
+		n = (n & 0xf00) * 0x1100
+		  + (n & 0xf0 ) * 0x110
+		  + (n & 0xf  ) * 0x11;
+
+		/* fallthrough */
+
+	case 6:
+		n <<= 8;
+		n |= 0xff; /* implicit alpha */
+
+		/* fallthrough */
+
+	case 8:
+		return (struct rgba) {
+			(n & 0xff000000UL) / (double) 0xff000000UL,
+			(n & 0xff0000UL)   / (double) 0xff0000UL,
+			(n & 0xff00UL)     / (double) 0xff00UL,
+			(n & 0xffUL)       / (double) 0xffUL
+		};
+
+	default:
+		goto error;
+	}
+
+error:
+
+	fprintf(stderr, "invalid color: %s\n", s);
+	exit(1);
 }
 
 static void
