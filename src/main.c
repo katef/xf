@@ -69,6 +69,12 @@ enum op_type {
 	OP_ORDER,
 	OP_GROW,
 	OP_BASIS,
+	OP_LINE_DASH,
+	OP_LINE_CAP,
+	OP_LINE_JOIN,
+	OP_LINE_OFFSET,
+	OP_LINE_WIDTH,
+	OP_MITER_LIMIT,
 	OP_IMG,
 	OP_RULE,
 	OP_MARKUP,
@@ -126,6 +132,12 @@ struct act {
 
 		struct act_rule {
 			struct rgba fg;
+//			dashes
+			cairo_line_cap_t line_cap;
+			cairo_line_join_t line_join;
+			double line_offset;
+			double line_width;
+			double miter_limit;
 		} rule;
 
 		struct act_text {
@@ -166,6 +178,12 @@ struct eval_state {
 	float grow;
 	float shrink;
 	float basis;
+//	double *dashes;
+	cairo_line_cap_t line_cap;
+	cairo_line_join_t line_join;
+	double line_offset;
+	double line_width;
+	double miter_limit;
 	int order;
 	const char *ca_name;
 	PangoFontDescription *desc;
@@ -311,6 +329,14 @@ flex_strtoi(const char *s, int min, int max)
 	}
 
 	return (int) l;
+}
+
+static double
+xf_strtod(const char *s, double min, double max)
+{
+	assert(s != NULL);
+
+	return flex_strtof(s, min, max); /* accurate enough for our needs */
 }
 
 /* frame coordinates contain the padding but not the margins */
@@ -513,6 +539,58 @@ align_name(const char *name)
 	exit(1);
 }
 
+static cairo_line_cap_t
+line_cap_name(const char *name)
+{
+	size_t i;
+
+	struct {
+		const char *name;
+		cairo_line_cap_t cap;
+	} a[] = {
+		{ "butt",   CAIRO_LINE_CAP_BUTT   },
+		{ "round",  CAIRO_LINE_CAP_ROUND  },
+		{ "square", CAIRO_LINE_CAP_SQUARE }
+	};
+
+	assert(name != NULL);
+
+	for (i = 0; i < sizeof a / sizeof *a; i++) {
+		if (0 == strcmp(a[i].name, name)) {
+			return a[i].cap;
+		}
+	}
+
+	fprintf(stderr, "%s: unrecognised line-cap\n", name);
+	exit(1);
+}
+
+static cairo_line_join_t
+line_join_name(const char *name)
+{
+	size_t i;
+
+	struct {
+		const char *name;
+		cairo_line_join_t join;
+	} a[] = {
+		{ "miter", CAIRO_LINE_JOIN_MITER },
+		{ "round", CAIRO_LINE_JOIN_ROUND },
+		{ "bevel", CAIRO_LINE_JOIN_BEVEL }
+	};
+
+	assert(name != NULL);
+
+	for (i = 0; i < sizeof a / sizeof *a; i++) {
+		if (0 == strcmp(a[i].name, name)) {
+			return a[i].join;
+		}
+	}
+
+	fprintf(stderr, "%s: unrecognised line-join\n", name);
+	exit(1);
+}
+
 static enum op_type
 op_name(const char *name)
 {
@@ -538,6 +616,12 @@ op_name(const char *name)
 		{ "shrink", OP_SHRINK },
 		{ "order",  OP_ORDER  },
 		{ "basis",  OP_BASIS  },
+//		{ "line-dash",   OP_LINE_DASH   },
+		{ "line-cap",    OP_LINE_CAP    },
+		{ "line-join",   OP_LINE_JOIN   },
+		{ "line-offset", OP_LINE_OFFSET },
+		{ "line-width",  OP_LINE_WIDTH  },
+		{ "miter-limit", OP_MITER_LIMIT },
 		{ "img",    OP_IMG    },
 		{ "rule",   OP_RULE   },
 		{ "markup", OP_MARKUP },
@@ -800,6 +884,12 @@ op_img(struct act *act, const char *file,
 static struct flex_item *
 op_rule(struct act *act,
 	PangoFontDescription *desc, const struct rgba *fg,
+//	dashes
+	cairo_line_cap_t line_cap,
+	cairo_line_join_t line_join,
+	double line_offset,
+	double line_width,
+	double miter_limit,
 	double margin, double padding)
 {
 	struct flex_item *item;
@@ -811,7 +901,13 @@ op_rule(struct act *act,
 
 	act->type = ACT_RULE;
 
-	act->u.rule.fg   = *fg;
+	act->u.rule.fg           = *fg;
+//	act->u.rule.dashes       = ...;
+	act->u.rule.line_cap     = line_cap;
+	act->u.rule.line_join    = line_join;
+	act->u.rule.line_offset  = line_offset;
+	act->u.rule.line_width   = line_width;
+	act->u.rule.miter_limit  = miter_limit;
 
 	item = flex_item_new();
 
@@ -955,8 +1051,13 @@ paint(cairo_t *cr, const struct act *b, size_t n)
 			break;
 
 		case ACT_RULE: {
-			/* TODO: line style, dashed etc */
 			/* TODO: automatic horizontal/vertical rule */
+
+//			cairo_set_dash(cr, b[i].u.rule.dashes, TODO, b[i].u.rule.line_offset);
+			cairo_set_line_cap(cr, b[i].u.rule.line_cap);
+			cairo_set_line_join(cr, b[i].u.rule.line_join);
+			cairo_set_line_width(cr, b[i].u.rule.line_width);
+			cairo_set_miter_limit(cr, b[i].u.rule.miter_limit);
 
 			cairo_set_source_rgba(cr, b[i].u.rule.fg.r, b[i].u.rule.fg.g, b[i].u.rule.fg.b, b[i].u.rule.fg.a);
 			cairo_move_to(cr, f->x + p->l, f->y + p->t + ((f->h - p->h) / 2.0));
@@ -1194,10 +1295,21 @@ eval_op(struct eval_state *state, const struct op *op, struct act *b)
 		state->align_self = align_name(op->arg);
 		return NULL;
 
+// XXX: HUGE_VAL rather than INFINITY?
 	case OP_SHRINK: state->shrink = flex_strtof(op->arg, 0, INFINITY); return NULL;
 	case OP_ORDER:  state->order  = flex_strtoi(op->arg, 0, INT_MAX);  return NULL;
 	case OP_GROW:   state->grow   = flex_strtof(op->arg, 0, INFINITY); return NULL;
 	case OP_BASIS:  state->basis  = flex_strtof(op->arg, 0, INFINITY); return NULL; /* TODO: auto, etc */
+
+// TODO: error on an odd number of dashes
+// TODO: cairo_set_operator(); - more general
+
+//	case OP_LINE_DASH:   state->line_dash   = parse_dashes(op->arg);           return NULL;
+	case OP_LINE_CAP:    state->line_cap    = line_cap_name(op->arg);          return NULL;
+	case OP_LINE_JOIN:   state->line_join   = line_join_name(op->arg);         return NULL;
+	case OP_LINE_OFFSET: state->line_offset = xf_strtod(op->arg, 0, INFINITY); return NULL;
+	case OP_LINE_WIDTH:  state->line_width  = xf_strtod(op->arg, 0, INFINITY); return NULL;
+	case OP_MITER_LIMIT: state->miter_limit = xf_strtod(op->arg, 0, INFINITY); return NULL;
 
 	case OP_IMG:
 		item = op_img(b, op->arg, state->margin, state->padding);
@@ -1208,7 +1320,13 @@ eval_op(struct eval_state *state, const struct op *op, struct act *b)
 			fprintf(stderr, "^rule{} is a non-clickable area\n");
 			exit(1);
 		}
-		item = op_rule(b, state->desc, &state->fg, state->margin, state->padding);
+		item = op_rule(b, state->desc, &state->fg,
+			state->line_cap,
+			state->line_join,
+			state->line_offset,
+			state->line_width,
+			state->miter_limit,
+			state->margin, state->padding);
 		if (state->grow == 0.0) {
 			state->grow = 10.0; /* TODO: something sensible for OP_RULE */
 		}
@@ -1243,19 +1361,25 @@ eval_line(struct eval_ctx *ectx, int width, int height, const struct op *ops, un
 	assert(ops != NULL);
 
 	/* evaluator state persists between ops, reset for each line */
-	state.root    = flex_item_new();
-	state.margin  = 0;
-	state.padding = 0;
-	state.fg      = parse_color("white");
-	state.bg      = parse_color("black");
-	state.align_self = FLEX_ALIGN_AUTO;
-	state.grow    = 0.0;
-	state.shrink  = 0.0;
-	state.basis   = NAN;
-	state.order   = 0;
-	state.ca_name = NULL;
-	state.desc    = NULL;
-	state.e       = PANGO_ELLIPSIZE_NONE;
+	state.root        = flex_item_new();
+	state.margin      = 0;
+	state.padding     = 0;
+	state.fg          = (struct rgba) { 1.0, 1.0, 1.0, 1.0 };
+	state.bg          = (struct rgba) { 0.0, 0.0, 0.0, 1.0 };
+	state.align_self  = FLEX_ALIGN_AUTO;
+	state.grow        = 0.0;
+	state.shrink      = 0.0;
+	state.basis       = NAN;
+//	state.dashes      = ...;
+	state.line_cap    = CAIRO_LINE_CAP_BUTT;
+	state.line_join   = CAIRO_LINE_JOIN_MITER;
+	state.line_offset = 0.0;
+	state.line_width  = 1.0;
+	state.miter_limit = 10.0;
+	state.order       = 0;
+	state.ca_name     = NULL;
+	state.desc        = NULL;
+	state.e           = PANGO_ELLIPSIZE_NONE;
 
 	parse_font(&state.desc, "Sans");
 
