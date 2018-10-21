@@ -116,7 +116,7 @@ struct act {
 	struct geom f;
 	struct outline m;
 	struct outline p;
-	PangoColor bg;
+	struct rgba bg;
 	const char *ca_name;
 
 	union {
@@ -125,13 +125,13 @@ struct act {
 		} img;
 
 		struct act_rule {
-			PangoColor fg;
+			struct rgba fg;
 		} rule;
 
 		struct act_text {
 			PangoFontDescription *desc;
 			PangoEllipsizeMode e;
-			PangoColor fg;
+			struct rgba fg;
 			void (*f)(PangoLayout *, const char *, int);
 			const char *s;
 		} text;
@@ -161,8 +161,7 @@ struct eval_state {
 	struct flex_item *root;
 	double margin;
 	double padding;
-	PangoColor fg;
-	PangoColor bg;
+	struct rgba fg, bg;
 	flex_align align_self;
 	float grow;
 	float shrink;
@@ -675,10 +674,11 @@ win_create(xcb_connection_t *xcb, xcb_ewmh_connection_t *ewmh,
 	return win;
 }
 
-static PangoColor
+static struct rgba
 op_color(const char *s)
 {
-	PangoColor c;
+	struct rgba c;
+	PangoColor color;
 
 	assert(s != NULL);
 
@@ -686,9 +686,14 @@ op_color(const char *s)
 	/* TODO: allow #rrggbbaa for alpha */
 
 	/* CSS spec color names */
-	if (!pango_color_parse(&c, s)) {
+	if (!pango_color_parse(&color, s)) {
 		perror("pango_color_parse");
 	}
+
+	c.r = color.red   / (double) UINT16_MAX;
+	c.g = color.green / (double) UINT16_MAX;
+	c.b = color.blue  / (double) UINT16_MAX;
+	c.a = 1.0;
 
 	return c;
 }
@@ -754,7 +759,7 @@ op_img(struct act *act, const char *file,
 
 static struct flex_item *
 op_rule(struct act *act,
-	PangoFontDescription *desc, PangoColor *fg,
+	PangoFontDescription *desc, const struct rgba *fg,
 	double margin, double padding)
 {
 	struct flex_item *item;
@@ -813,7 +818,7 @@ op_rule(struct act *act,
 
 static struct flex_item *
 op_text(struct act *act, const char *s,
-	PangoEllipsizeMode e, PangoFontDescription *desc, PangoColor *fg,
+	PangoEllipsizeMode e, PangoFontDescription *desc, const struct rgba *fg,
 	double margin, double padding,
 	void (*f)(PangoLayout *, const char *, int))
 {
@@ -891,7 +896,7 @@ paint(cairo_t *cr, const struct act *b, size_t n)
 		cairo_fill(cr);
 */
 
-		cairo_set_source_rgba(cr, b[i].bg.red, b[i].bg.green, b[i].bg.blue, 1.0);
+		cairo_set_source_rgba(cr, b[i].bg.r, b[i].bg.g, b[i].bg.b, b[i].bg.a);
 		cairo_rectangle(cr, f->x, f->y, f->w, f->h);
 		cairo_fill(cr);
 
@@ -913,7 +918,7 @@ paint(cairo_t *cr, const struct act *b, size_t n)
 			/* TODO: line style, dashed etc */
 			/* TODO: automatic horizontal/vertical rule */
 
-			cairo_set_source_rgba(cr, b[i].u.rule.fg.red, b[i].u.rule.fg.green, b[i].u.rule.fg.blue, 1.0);
+			cairo_set_source_rgba(cr, b[i].u.rule.fg.r, b[i].u.rule.fg.g, b[i].u.rule.fg.b, b[i].u.rule.fg.a);
 			cairo_move_to(cr, f->x + p->l, f->y + p->t + ((f->h - p->h) / 2.0));
 			cairo_rel_line_to(cr, f->w - p->w, 0.0);
 			cairo_stroke(cr);
@@ -943,7 +948,7 @@ paint(cairo_t *cr, const struct act *b, size_t n)
 /*
 			int baseline = pango_layout_get_baseline(b[i].u.text.layout);
 
-			cairo_set_source_rgba(cr, b[i].u.text.fg.red * 0.2, b[i].u.text.fg.green * 0.2, b[i].u.text.fg.blue * 0.2, 0.8);
+			cairo_set_source_rgba(cr, b[i].u.text.fg.r * 0.2, b[i].u.text.fg.g * 0.2, b[i].u.text.fg.b * 0.2, b[i]..u.text.fg.a * 0.8);
 			cairo_move_to(cr, f->x + p->l, f->y + p->t + (double) baseline / PANGO_SCALE);
 			cairo_rel_line_to(cr, f->w - p->w, 0.0);
 			cairo_stroke(cr);
@@ -954,7 +959,7 @@ paint(cairo_t *cr, const struct act *b, size_t n)
 			b[i].u.text.f(layout, b[i].u.text.s, -1);
 
 			cairo_move_to(cr, f->x + p->l, f->y + p->t);
-			cairo_set_source_rgba(cr, b[i].u.text.fg.red, b[i].u.text.fg.green, b[i].u.text.fg.blue, 1.0);
+			cairo_set_source_rgba(cr, b[i].u.text.fg.r, b[i].u.text.fg.g, b[i].u.text.fg.b, b[i].u.text.fg.a);
 			pango_cairo_show_layout(cr, layout);
 
 			g_object_unref(layout);
