@@ -556,6 +556,83 @@ op_name(const char *name)
 	exit(1);
 }
 
+static struct rgba
+parse_color(const char *s)
+{
+	unsigned long n;
+	char *e;
+
+	assert(s != NULL);
+
+	if (s[0] != '#') {
+		PangoColor color;
+
+		/* CSS spec color names */
+		if (!pango_color_parse(&color, s)) {
+			perror("pango_color_parse");
+			exit(1);
+		}
+
+		return (struct rgba) {
+			color.red   / (double) UINT16_MAX,
+			color.green / (double) UINT16_MAX,
+			color.blue  / (double) UINT16_MAX,
+			1.0
+		};
+	}
+
+	s++;
+
+	n = strtoul(s, &e, 16);
+	if (n == ULONG_MAX || *e != '\0') {
+		goto error;
+	}
+
+	switch (e - s) {
+	case 3:
+		n = (n & 0xf00) * 0x1100
+		  + (n & 0xf0 ) * 0x110
+		  + (n & 0xf  ) * 0x11;
+
+		/* fallthrough */
+
+	case 6:
+		n <<= 8;
+		n |= 0xff; /* implicit alpha */
+
+		/* fallthrough */
+
+	case 8:
+		return (struct rgba) {
+			(n & 0xff000000UL) / (double) 0xff000000UL,
+			(n & 0xff0000UL)   / (double) 0xff0000UL,
+			(n & 0xff00UL)     / (double) 0xff00UL,
+			(n & 0xffUL)       / (double) 0xffUL
+		};
+
+	default:
+		goto error;
+	}
+
+error:
+
+	fprintf(stderr, "invalid color: %s\n", s);
+	exit(1);
+}
+
+static void
+parse_font(PangoFontDescription **desc, const char *s)
+{
+	assert(desc != NULL);
+	assert(s != NULL);
+
+	if (*desc != NULL) {
+		pango_font_description_free(*desc);
+	}
+
+	*desc = pango_font_description_from_string(s);
+}
+
 static void
 print_modifiers(uint32_t mask)
 {
@@ -672,83 +749,6 @@ win_create(xcb_connection_t *xcb, xcb_ewmh_connection_t *ewmh,
 	xcb_map_window(xcb, win);
 
 	return win;
-}
-
-static struct rgba
-op_color(const char *s)
-{
-	unsigned long n;
-	char *e;
-
-	assert(s != NULL);
-
-	if (s[0] != '#') {
-		PangoColor color;
-
-		/* CSS spec color names */
-		if (!pango_color_parse(&color, s)) {
-			perror("pango_color_parse");
-			exit(1);
-		}
-
-		return (struct rgba) {
-			color.red   / (double) UINT16_MAX,
-			color.green / (double) UINT16_MAX,
-			color.blue  / (double) UINT16_MAX,
-			1.0
-		};
-	}
-
-	s++;
-
-	n = strtoul(s, &e, 16);
-	if (n == ULONG_MAX || *e != '\0') {
-		goto error;
-	}
-
-	switch (e - s) {
-	case 3:
-		n = (n & 0xf00) * 0x1100
-		  + (n & 0xf0 ) * 0x110
-		  + (n & 0xf  ) * 0x11;
-
-		/* fallthrough */
-
-	case 6:
-		n <<= 8;
-		n |= 0xff; /* implicit alpha */
-
-		/* fallthrough */
-
-	case 8:
-		return (struct rgba) {
-			(n & 0xff000000UL) / (double) 0xff000000UL,
-			(n & 0xff0000UL)   / (double) 0xff0000UL,
-			(n & 0xff00UL)     / (double) 0xff00UL,
-			(n & 0xffUL)       / (double) 0xffUL
-		};
-
-	default:
-		goto error;
-	}
-
-error:
-
-	fprintf(stderr, "invalid color: %s\n", s);
-	exit(1);
-}
-
-static void
-op_font(PangoFontDescription **desc, const char *s)
-{
-	assert(desc != NULL);
-	assert(s != NULL);
-
-	if (*desc != NULL) {
-		pango_font_description_free(*desc);
-	}
-
-	*desc = pango_font_description_from_string(s);
 }
 
 static struct flex_item *
@@ -1169,9 +1169,9 @@ eval_op(struct eval_state *state, const struct op *op, struct act *b)
 		return NULL;
 
 	case OP_CA:        state->ca_name = op->arg;           return NULL;
-	case OP_BG:        state->bg = op_color(op->arg);      return NULL;
-	case OP_FG:        state->fg = op_color(op->arg);      return NULL;
-	case OP_FONT:      op_font(&state->desc, op->arg);     return NULL;
+	case OP_BG:        state->bg = parse_color(op->arg);    return NULL;
+	case OP_FG:        state->fg = parse_color(op->arg);    return NULL;
+	case OP_FONT:      parse_font(&state->desc, op->arg);   return NULL;
 	case OP_ELLIPSIZE: state->e = ellipsize_name(op->arg); return NULL;
 
 	case OP_DIR:
@@ -1246,8 +1246,8 @@ eval_line(struct eval_ctx *ectx, int width, int height, const struct op *ops, un
 	state.root    = flex_item_new();
 	state.margin  = 0;
 	state.padding = 0;
-	state.fg      = op_color("white");
-	state.bg      = op_color("black");
+	state.fg      = parse_color("white");
+	state.bg      = parse_color("black");
 	state.align_self = FLEX_ALIGN_AUTO;
 	state.grow    = 0.0;
 	state.shrink  = 0.0;
@@ -1257,7 +1257,7 @@ eval_line(struct eval_ctx *ectx, int width, int height, const struct op *ops, un
 	state.desc    = NULL;
 	state.e       = PANGO_ELLIPSIZE_NONE;
 
-	op_font(&state.desc, "Sans");
+	parse_font(&state.desc, "Sans");
 
 	flex_item_set_width(state.root, width);
 	flex_item_set_height(state.root, height);
