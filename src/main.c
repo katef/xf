@@ -193,6 +193,9 @@ struct eval_state {
 pthread_mutex_t mutex_ops  = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_acts = PTHREAD_MUTEX_INITIALIZER;
 
+static struct rgba fg_default = (struct rgba) { 1.0, 1.0, 1.0, 1.0 };
+static struct rgba bg_default = (struct rgba) { 0.0, 0.0, 0.0, 1.0 };
+
 static void
 xlock(pthread_mutex_t *mutex)
 {
@@ -641,12 +644,16 @@ op_name(const char *name)
 }
 
 static struct rgba
-parse_color(const char *s)
+parse_color(const char *s, const struct rgba *fallback)
 {
 	unsigned long n;
 	char *e;
 
 	assert(s != NULL);
+
+	if (s[0] == '\0') {
+		return *fallback;
+	}
 
 	if (s[0] != '#') {
 		PangoColor color;
@@ -1269,11 +1276,11 @@ eval_op(struct eval_state *state, const struct op *op, struct act *b)
 		}
 		return NULL;
 
-	case OP_CA:        state->ca_name = op->arg;           return NULL;
-	case OP_BG:        state->bg = parse_color(op->arg);    return NULL;
-	case OP_FG:        state->fg = parse_color(op->arg);    return NULL;
-	case OP_FONT:      parse_font(&state->desc, op->arg);   return NULL;
-	case OP_ELLIPSIZE: state->e = ellipsize_name(op->arg); return NULL;
+	case OP_CA:        state->ca_name = op->arg;                      return NULL;
+	case OP_BG:        state->bg = parse_color(op->arg, &bg_default); return NULL;
+	case OP_FG:        state->fg = parse_color(op->arg, &fg_default); return NULL;
+	case OP_FONT:      parse_font(&state->desc, op->arg);             return NULL;
+	case OP_ELLIPSIZE: state->e = ellipsize_name(op->arg);            return NULL;
 
 	case OP_DIR:
 		flex_item_set_direction(state->root, dir_name(op->arg));
@@ -1364,8 +1371,8 @@ eval_line(struct eval_ctx *ectx, int width, int height, const struct op *ops, un
 	state.root        = flex_item_new();
 	state.margin      = 0;
 	state.padding     = 0;
-	state.fg          = (struct rgba) { 1.0, 1.0, 1.0, 1.0 };
-	state.bg          = (struct rgba) { 0.0, 0.0, 0.0, 1.0 };
+	state.fg          = fg_default;
+	state.bg          = bg_default;
 	state.align_self  = FLEX_ALIGN_AUTO;
 	state.grow        = 0.0;
 	state.shrink      = 0.0;
